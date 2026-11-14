@@ -22,6 +22,7 @@ final class TripStoryCheck {
         var measured = new TripStory(18, null, null).withMeasured(meter.last());
         assert measured.distance().equals("15 m") && measured.duration().equals("2초");
         assert measured.text().contains("2초 동안 15 m");
+        assert meter.last().hardBraking() && !meter.last().speedExceeded();
         assert low.withMeasured(meter.last()).equals(low);
         meter.gear(false, 1_000_000_000L);
         assert meter.last() == null;
@@ -36,5 +37,17 @@ final class TripStoryCheck {
         meter.speed(10_000_000_000L, -10);
         meter.gear(true, 16_000_000_000L);
         assert meter.last() == null;
+
+        meter.gear(false, 17_000_000_000L);
+        meter.speed(17_000_000_000L, 24);
+        meter.speed(17_200_000_000L, 23.8f);
+        meter.gear(true, 17_300_000_000L);
+        assert meter.last().speedExceeded() && !meter.last().hardBraking();
+
+        meter.gear(false, 18_000_000_000L);
+        meter.speed(18_000_000_000L, 10);
+        meter.speed(20_000_000_000L, 0);
+        meter.gear(true, 20_100_000_000L);
+        assert !meter.last().speedExceeded() && !meter.last().hardBraking();
     }
 }

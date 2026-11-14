@@ -1,6 +1,7 @@
 package app.carbuddy;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.car.Car;
 import android.car.drivingstate.CarUxRestrictions;
 import android.car.drivingstate.CarUxRestrictionsManager;
@@ -9,12 +10,18 @@ import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.content.res.ColorStateList;
 import android.graphics.Canvas;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Paint;
-import android.graphics.Path;
+import android.graphics.Rect;
+import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
+import android.media.AudioAttributes;
+import android.media.AudioManager;
+import android.media.AudioPlaybackConfiguration;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -24,10 +31,11 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import java.util.List;
 
 public final class MainActivity extends Activity {
     private static final int PAPER = 0xfff7f2e8, INK = 0xff183731, MUTED = 0xff46615a;
-    private static final int MINT = 0xff95ddb1, PEACH = 0xffffb793, STAGE = 0xff173b35;
+    private static final int STAGE = 0xff173b35;
     private static final TripStory EMPTY = new TripStory(null, null, null);
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Car car;
@@ -35,16 +43,28 @@ public final class MainActivity extends Activity {
     private TripRecorder recorder;
     private VehicleReader reader;
     private TripStory trip = EMPTY;
-    private boolean resumed, allowed, loading, open, peach;
+    private boolean resumed, allowed, loading, open, musicPlaying;
+    private AudioManager audio;
+    private final AudioManager.AudioPlaybackCallback playback = new AudioManager.AudioPlaybackCallback() {
+        @Override public void onPlaybackConfigChanged(List<AudioPlaybackConfiguration> configs) {
+            updateMusic();
+        }
+    };
+    private CharacterArt character;
+    private Expression preview;
+    private AlertDialog reactionDialog;
     private int request;
     private TextView headerStatus, mascotTitle, mascotNote, distance, duration, battery, storyCopy;
-    private Button diary, refresh, color, speedPermission;
+    private Button diary, refresh, reactions, speedPermission;
+    private LinearLayout characters;
+    private final Button[] characterButtons = new Button[CharacterArt.values().length];
     private Mascot mascot;
     private LinearLayout metrics, controls;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        peach = getPreferences(MODE_PRIVATE).getBoolean("peach", false);
+        character = CharacterArt.saved(getPreferences(MODE_PRIVATE).getString("character", ""));
+        audio = getSystemService(AudioManager.class);
         build();
         car = Car.createCar(this, handler, Car.CAR_WAIT_TIMEOUT_DO_NOT_WAIT, (connected, ready) -> {
             closeRecorder();
@@ -70,12 +90,18 @@ public final class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         resumed = true;
+        if (audio != null) {
+            audio.registerAudioPlaybackCallback(playback, handler);
+            updateMusic();
+        }
         if (car != null && car.isConnected()) startRecorder(car);
         checkRestrictions();
     }
 
     @Override protected void onPause() {
         resumed = false;
+        if (audio != null) audio.unregisterAudioPlaybackCallback(playback);
+        musicPlaying = false;
         updateRestrictions(null);
         super.onPause();
     }
@@ -90,6 +116,17 @@ public final class MainActivity extends Activity {
 
     private boolean hasSpeedPermission() {
         return checkSelfPermission(Car.PERMISSION_SPEED) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void updateMusic() {
+        boolean active = resumed && audio != null && audio.getActivePlaybackConfigurations().stream().anyMatch(config -> {
+            AudioAttributes attributes = config.getAudioAttributes();
+            return attributes.getUsage() == AudioAttributes.USAGE_MEDIA
+                    && attributes.getContentType() == AudioAttributes.CONTENT_TYPE_MUSIC;
+        });
+        if (musicPlaying == active) return;
+        musicPlaying = active;
+        if (allowed) render();
     }
 
     private void startRecorder(Car connected) {
@@ -139,6 +176,8 @@ public final class MainActivity extends Activity {
         if (!allowed) {
             request++;
             loading = open = false;
+            preview = null;
+            if (reactionDialog != null) reactionDialog.dismiss();
             trip = EMPTY;
             if (reader != null) { reader.close(); reader = null; }
         } else {
@@ -211,14 +250,31 @@ public final class MainActivity extends Activity {
         mascot = new Mascot();
         mascot.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         stage.addView(mascot, new LinearLayout.LayoutParams(-1, dp(wide ? 218 : 170)));
-        color = button("차 색상 바꾸기", STAGE, 0xffd4ebe1, 0xff73968a);
-        color.setOnClickListener(v -> {
-            if (!checkRestrictions()) return;
-            peach = !peach;
-            getPreferences(MODE_PRIVATE).edit().putBoolean("peach", peach).apply();
-            render();
-        });
-        stage.addView(color, new LinearLayout.LayoutParams(-2, dp(52)));
+        characters = column();
+        stage.addView(characters, params(-1, -2, 4, 0));
+        for (int start = 0; start < characterButtons.length; start += 2) {
+            LinearLayout row = new LinearLayout(this);
+            characters.addView(row, params(-1, -2, 0, 6));
+            for (int index = start; index < start + 2; index++) {
+                CharacterArt option = CharacterArt.values()[index];
+                Button choice = button(option.label, STAGE, Color.WHITE, 0xff73968a);
+                choice.setPadding(dp(6), 0, dp(6), 0);
+                choice.setSingleLine(true);
+                LinearLayout.LayoutParams choiceSize = new LinearLayout.LayoutParams(0, dp(48), 1f);
+                if (index == start) choiceSize.setMarginEnd(dp(8));
+                row.addView(choice, choiceSize);
+                characterButtons[index] = choice;
+                choice.setOnClickListener(v -> {
+                    if (!checkRestrictions()) return;
+                    character = option;
+                    getPreferences(MODE_PRIVATE).edit().putString("character", option.name()).apply();
+                    render();
+                });
+            }
+        }
+        reactions = button("표정 미리보기", STAGE, 0xffd4ebe1, 0xff73968a);
+        reactions.setOnClickListener(v -> chooseExpression());
+        stage.addView(reactions, params(-1, dp(48), 3, 0));
 
         LinearLayout panel = column();
         panel.setPadding(dp(4), dp(wide ? 8 : 0), dp(4), 0);
@@ -259,18 +315,28 @@ public final class MainActivity extends Activity {
 
     private void render() {
         TripStory entry = diaryTrip();
+        TripMeter.Summary measured = lastMeasured();
+        Expression face = preview != null ? preview : automaticExpression(measured);
         headerStatus.setText(allowed ? "주차 중  ·  Pleos Vehicle" : "주차 시 이용 가능");
-        mascotTitle.setText(!allowed ? "안전하게 도착하면 만나!" : trip.low() ? "에너지가 조금 부족해" : "안녕, 난 카버디야");
-        mascotNote.setText(!allowed ? "주차한 뒤 다시 열어 줘." : trip.low() ? "다음 출발 전에 충전을 확인해 줘." : "지금 차의 상태를 함께 살펴봐요.");
+        mascotTitle.setText(!allowed ? "안전하게 도착하면 만나!" : character.label);
+        mascotNote.setText(!allowed ? "주차한 뒤 다시 열어 줘."
+                : (preview != null ? "미리보기 · " : "") + face.note);
         mascot.setVisibility(allowed ? View.VISIBLE : View.GONE);
-        mascot.invalidate();
-        color.setVisibility(allowed ? View.VISIBLE : View.GONE);
+        if (allowed) mascot.show(character, face);
+        characters.setVisibility(allowed ? View.VISIBLE : View.GONE);
+        reactions.setVisibility(allowed ? View.VISIBLE : View.GONE);
+        for (Button choice : characterButtons) {
+            boolean selected = choice.getText().toString().equals(character.label);
+            choice.setSelected(selected);
+            choice.setTextColor(selected ? INK : Color.WHITE);
+            choice.setBackgroundTintList(selected ? ColorStateList.valueOf(0xffc9e6d6) : null);
+        }
         metrics.setVisibility(allowed ? View.VISIBLE : View.GONE);
         controls.setVisibility(allowed ? View.VISIBLE : View.GONE);
         storyCopy.setText(!allowed ? "차량의 주행 제한이 해제되면 일기를 볼 수 있어요."
                 : loading ? "차량에서 이번 트립 기록을 읽고 있어요."
                 : !entry.hasData() ? "아직 확인할 수 있는 차량 기록이 없어요."
-                : open ? entry.text() : "카버디에게 이번 이동 이야기를 들어보세요.");
+                : open ? entry.text() + motionNote(measured) : character.label + "에게 이번 이동 이야기를 들어보세요.");
         distance.setText(entry.distance());
         duration.setText(entry.duration());
         battery.setText(trip.battery() == null ? "—" : trip.battery() + "%");
@@ -279,6 +345,45 @@ public final class MainActivity extends Activity {
         diary.setAlpha(diary.isEnabled() ? 1f : .55f);
         refresh.setEnabled(allowed && !loading);
         speedPermission.setVisibility(allowed && !hasSpeedPermission() ? View.VISIBLE : View.GONE);
+    }
+
+    private TripMeter.Summary lastMeasured() {
+        return recorder == null ? null : recorder.last();
+    }
+
+    private Expression automaticExpression(TripMeter.Summary measured) {
+        if (trip.low()) return Expression.BATTERY;
+        if (musicPlaying) return Expression.MUSIC;
+        if (measured != null && measured.hardBraking()) return Expression.BRAKE;
+        if (measured != null && measured.speedExceeded()) return Expression.SPEED;
+        return Expression.NEUTRAL;
+    }
+
+    private String motionNote(TripMeter.Summary measured) {
+        if (measured == null) return "";
+        String note = measured.hardBraking() ? "\n급감속이 있었어." : "";
+        if (measured.speedExceeded()) {
+            note += "\n미리 정한 " + TripMeter.SPEED_CUE_KPH + " km/h를 넘은 구간이 있었어.";
+        }
+        return note;
+    }
+
+    private void chooseExpression() {
+        if (!checkRestrictions()) return;
+        Expression[] choices = Expression.values();
+        String[] labels = new String[choices.length];
+        labels[0] = "자동 · 차량 상태 반영";
+        for (int i = 1; i < choices.length; i++) labels[i] = choices[i].label;
+        reactionDialog = new AlertDialog.Builder(this).setTitle(character.label + " 표정 미리보기")
+                .setSingleChoiceItems(labels, preview == null ? 0 : preview.ordinal(), (dialog, index) -> {
+                    if (checkRestrictions()) {
+                        preview = index == 0 ? null : choices[index];
+                        render();
+                    }
+                    dialog.dismiss();
+                }).setNegativeButton("닫기", null).create();
+        reactionDialog.setOnDismissListener(dialog -> reactionDialog = null);
+        reactionDialog.show();
     }
 
     private TextView metric(String label) {
@@ -331,56 +436,77 @@ public final class MainActivity extends Activity {
         return button;
     }
 
+    private enum Expression {
+        NEUTRAL("", "지금 차의 상태를 함께 살펴봐요."),
+        BATTERY("배터리 부족", "에너지가 적어서 땀이 나요."),
+        MUSIC("음악 재생", "음악이 들리니 신나요."),
+        BRAKE("급감속", "갑자기 속도가 줄어 깜짝 놀랐어요."),
+        SPEED("속도 초과", "정해 둔 속도를 넘어서 긴장했어요.");
+
+        final String label;
+        final String note;
+
+        Expression(String label, String note) {
+            this.label = label;
+            this.note = note;
+        }
+    }
+
+    private enum CharacterArt {
+        MOMOKA("모모카", R.drawable.momoka),
+        DINOCA("디노카", R.drawable.dinoca),
+        NYANGCA("냥카", R.drawable.nyangca),
+        POCA("포카", R.drawable.poca);
+
+        final String label;
+        final int image;
+
+        CharacterArt(String label, int image) {
+            this.label = label;
+            this.image = image;
+        }
+
+        static CharacterArt saved(String name) {
+            for (CharacterArt choice : values()) {
+                if (choice.name().equals(name)) return choice;
+            }
+            return MOMOKA;
+        }
+    }
+
     private final class Mascot extends View {
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Path path = new Path();
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        private final Rect source = new Rect();
+        private final RectF destination = new RectF();
+        private CharacterArt current;
+        private Expression face;
+        private Bitmap sheet;
 
         Mascot() { super(MainActivity.this); }
-        private void fill(int color) { paint.setColor(color); paint.setStyle(Paint.Style.FILL); }
-        @Override protected void onDraw(Canvas c) {
-            super.onDraw(c);
-            float scale = Math.min(getWidth() / 380f, getHeight() / 224f);
-            c.save();
-            c.translate((getWidth() - 380 * scale) / 2, (getHeight() - 224 * scale) / 2);
-            c.scale(scale, scale);
-            fill(0xff265348);
-            c.drawOval(26, 165, 354, 193, paint);
-            fill(0xff0c2825);
-            c.drawRoundRect(68, 143, 116, 182, 11, 11, paint);
-            c.drawRoundRect(264, 143, 312, 182, 11, 11, paint);
-            fill(peach ? PEACH : MINT);
-            path.reset();
-            path.moveTo(48, 132); path.quadTo(48, 110, 75, 101);
-            path.lineTo(99, 60); path.quadTo(108, 45, 130, 45);
-            path.lineTo(250, 45); path.quadTo(271, 45, 281, 61);
-            path.lineTo(306, 102); path.quadTo(333, 109, 333, 133);
-            path.lineTo(333, 151); path.quadTo(333, 168, 313, 169);
-            path.lineTo(69, 169); path.quadTo(48, 168, 48, 151); path.close();
-            c.drawPath(path, paint);
-            fill(0xff477467);
-            path.reset();
-            path.moveTo(102, 97); path.lineTo(117, 69); path.quadTo(122, 62, 134, 62);
-            path.lineTo(246, 62); path.quadTo(258, 62, 263, 69);
-            path.lineTo(279, 97); path.close(); c.drawPath(path, paint);
-            fill(0xffeef8e4);
-            c.drawRoundRect(62, 131, 98, 146, 7, 7, paint);
-            c.drawRoundRect(283, 131, 319, 146, 7, 7, paint);
-            fill(INK);
-            c.drawOval(126, 115, 148, 140, paint);
-            c.drawOval(233, 115, 255, 140, paint);
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeCap(Paint.Cap.ROUND);
-            paint.setStrokeWidth(5);
-            path.reset();
-            if (trip.low()) {
-                path.moveTo(177, 153); path.quadTo(190, 140, 203, 153);
-                path.moveTo(126, 108); path.lineTo(146, 102);
-                path.moveTo(235, 102); path.lineTo(255, 108);
-            } else {
-                path.moveTo(176, 143); path.quadTo(190, 160, 204, 143);
+
+        void show(CharacterArt next, Expression expression) {
+            if (current == next && face == expression) return;
+            if (current != next) {
+                sheet = BitmapFactory.decodeResource(getResources(), next.image);
+                current = next;
             }
-            c.drawPath(path, paint);
-            c.restore();
+            face = expression;
+            invalidate();
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            if (sheet == null) return;
+            int cellWidth = sheet.getWidth() / 2;
+            int cellHeight = sheet.getHeight() / 3;
+            int left = face.ordinal() % 2 * cellWidth;
+            int top = face.ordinal() / 2 * cellHeight;
+            source.set(left, top, left + cellWidth, top + cellHeight);
+            float scale = Math.min(getWidth() / (float) cellWidth, getHeight() / (float) cellHeight);
+            float width = cellWidth * scale, height = cellHeight * scale;
+            float x = (getWidth() - width) / 2, y = (getHeight() - height) / 2;
+            destination.set(x, y, x + width, y + height);
+            canvas.drawBitmap(sheet, source, destination, paint);
         }
     }
 }
