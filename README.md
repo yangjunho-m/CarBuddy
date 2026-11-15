@@ -6,8 +6,6 @@
 
 [카버디 공모전 영상 · YouTube Shorts](https://www.youtube.com/shorts/T5bJXsuvAyQ)
 
-[카버디 세로형 홍보 영상 (MP4, 37초)](https://github.com/yangjunho-m/CarBuddy/blob/main/demo/CarBuddy-reference-promo.mp4) · [Pleos 실동작 시연 (MP4, 25초)](https://github.com/yangjunho-m/CarBuddy/blob/main/demo/CarBuddy-contest-demo.mp4)
-
 ## Windows에서 바로 시연하기
 
 1. GitHub에서 **Code → Download ZIP**으로 받은 저장소 전체를 압축 해제합니다.
