@@ -2,13 +2,17 @@
 
 차량 상태에 반응하는 자동차 캐릭터와 주차 후 읽는 주행 일기입니다. Java 기반 Android Automotive OS 앱이며 Pleos Vehicle SDK 2.3.2를 사용합니다.
 
+## 시연 영상
+
+[카버디 세로형 홍보 영상 (MP4, 37초)](https://github.com/yangjunho-m/CarBuddy/blob/main/demo/CarBuddy-reference-promo.mp4) · [Pleos 실동작 시연 (MP4, 25초)](https://github.com/yangjunho-m/CarBuddy/blob/main/demo/CarBuddy-contest-demo.mp4)
+
 ## Windows에서 바로 시연하기
 
 1. GitHub에서 **Code → Download ZIP**으로 받은 저장소 전체를 압축 해제합니다.
-2. Android Studio의 SDK Manager에서 **Android SDK Platform-Tools**를 설치하고, [Pleos Connect 설치 가이드](https://document.pleos.ai/docs/connect/guide/getting-started/application-development/setup-connect-sdk-emulator)에 따라 에뮬레이터를 하나 실행합니다. 홈 화면이 뜰 때까지 기다립니다.
-3. 압축을 푼 폴더의 [`start-carbuddy-demo.bat`](start-carbuddy-demo.bat)를 더블클릭합니다. `apk/CarBuddy-debug.apk`가 설치되고, Pleos에서 카버디가 열립니다. 차량 조작 화면은 PC의 기본 브라우저에서 열립니다.
+2. 압축을 푼 폴더의 [`start-carbuddy-demo.bat`](start-carbuddy-demo.bat)를 더블클릭합니다. 실행 중인 Pleos 에뮬레이터 한 대가 있으면 그대로 사용합니다. 첫 설치라면 표시되는 Android SDK와 Pleos 약관을 읽고 동의한 후 다운로드와 부팅을 기다립니다.
+3. 카버디가 Pleos에서 실행되고 차량 조작 화면이 PC의 기본 브라우저에서 열립니다. 기어를 **P**에 두고 아래 시연 순서의 2번부터 따라 합니다.
 
-기어를 **P**에 두고 아래 시연 순서의 2번부터 따라 하면 됩니다. SDK를 별도 경로에 설치했고 배치 파일이 ADB를 찾지 못하면 `ANDROID_HOME`에 Android Studio의 SDK 경로를 지정하세요.
+자동 설치는 Intel·AMD 기반 64비트 Windows용입니다. 첫 실행에는 인터넷 연결과 약 30GB의 여유 공간을 권장합니다. 설치 파일과 에뮬레이터는 `%LOCALAPPDATA%\CarBuddy\Pleos`에 저장되며, 다음 실행에서 재사용합니다. 가상화 설정 안내가 나오면 [Windows Hypervisor Platform 설정 방법](https://developer.android.com/studio/run/emulator-acceleration)에 따라 켠 뒤 재부팅하고 배치 파일을 다시 실행하세요.
 
 ## 실행
 
