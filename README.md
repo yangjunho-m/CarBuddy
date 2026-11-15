@@ -2,6 +2,14 @@
 
 차량 상태에 반응하는 자동차 캐릭터와 주차 후 읽는 주행 일기입니다. Java 기반 Android Automotive OS 앱이며 Pleos Vehicle SDK 2.3.2를 사용합니다.
 
+## Windows에서 바로 시연하기
+
+1. GitHub에서 **Code → Download ZIP**으로 받은 저장소 전체를 압축 해제합니다.
+2. Android Studio의 SDK Manager에서 **Android SDK Platform-Tools**를 설치하고, [Pleos Connect 설치 가이드](https://document.pleos.ai/docs/connect/guide/getting-started/application-development/setup-connect-sdk-emulator)에 따라 에뮬레이터를 하나 실행합니다. 홈 화면이 뜰 때까지 기다립니다.
+3. 압축을 푼 폴더의 [`start-carbuddy-demo.bat`](start-carbuddy-demo.bat)를 더블클릭합니다. `apk/CarBuddy-debug.apk`가 설치되고, Pleos에서 카버디가 열립니다. 차량 조작 화면은 PC의 기본 브라우저에서 열립니다.
+
+기어를 **P**에 두고 아래 시연 순서의 2번부터 따라 하면 됩니다. SDK를 별도 경로에 설치했고 배치 파일이 ADB를 찾지 못하면 `ANDROID_HOME`에 Android Studio의 SDK 경로를 지정하세요.
+
 ## 실행
 
 1. Android Studio에서 이 폴더를 엽니다. JDK 17과 Android SDK Platform 35가 필요합니다.
