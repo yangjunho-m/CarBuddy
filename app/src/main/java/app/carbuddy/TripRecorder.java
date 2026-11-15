@@ -21,7 +21,10 @@ final class TripRecorder implements CarPropertyManager.CarPropertyEventCallback 
         meter = new TripMeter(new TripMeter.Checkpoint(saved.getBoolean("active", false),
                 saved.getBoolean("incomplete", false),
                 Double.longBitsToDouble(saved.getLong("meters", 0)), saved.getLong("moving_ns", 0),
-                saved.getBoolean("speed_exceeded", false), saved.getBoolean("hard_braking", false)));
+                saved.getBoolean("speed_exceeded", false), saved.getBoolean("hard_braking", false),
+                new TripMeter.Events(saved.getInt("speed_at", -1), saved.getInt("brake_at", -1),
+                        saved.getInt("acceleration_at", -1), saved.getInt("event_road_limit", 0)),
+                saved.getBoolean("destination_arrived", false), saved.getBoolean("diary_ready", false)));
     }
 
     void start() {
@@ -65,7 +68,13 @@ final class TripRecorder implements CarPropertyManager.CarPropertyEventCallback 
     boolean active() { return meter.active(); }
     boolean parked() { return meter.parked(); }
     boolean incomplete() { return meter.incomplete(); }
+    boolean diaryReady() { return meter.diaryReady(); }
     TripMeter.Summary summary() { return meter.summary(); }
+
+    void roadSpeedLimit(int kph) { meter.roadSpeedLimit(kph); }
+    void destinationArrived() { if (meter.destinationArrived()) persistChange(); }
+    void newRoute() { if (meter.newRoute()) persistChange(); }
+    void acknowledgeDiary() { if (meter.acknowledgeDiary()) persistChange(); }
 
     boolean finish() {
         if (!meter.finish()) return false;
@@ -81,7 +90,18 @@ final class TripRecorder implements CarPropertyManager.CarPropertyEventCallback 
                 .putLong("moving_ns", checkpoint.movingNs())
                 .putBoolean("speed_exceeded", checkpoint.speedExceeded())
                 .putBoolean("hard_braking", checkpoint.hardBraking())
+                .putInt("speed_at", checkpoint.events().speedAt())
+                .putInt("brake_at", checkpoint.events().brakeAt())
+                .putInt("acceleration_at", checkpoint.events().accelerationAt())
+                .putInt("event_road_limit", checkpoint.events().roadLimit())
+                .putBoolean("destination_arrived", checkpoint.destinationArrived())
+                .putBoolean("diary_ready", checkpoint.diaryReady())
                 .apply();
+    }
+
+    private void persistChange() {
+        save();
+        changed.run();
     }
 
     void close() {

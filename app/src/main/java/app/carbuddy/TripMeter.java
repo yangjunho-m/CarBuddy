@@ -4,17 +4,29 @@ final class TripMeter {
     private static final long MAX_GAP_NS = 5_000_000_000L;
     static final int SPEED_CUE_KPH = 80;
     private static final float HARD_BRAKING_MPS2 = 3.5f;
+    private static final float HARD_ACCELERATION_MPS2 = 3.5f;
     private static final long MIN_BRAKE_INTERVAL_NS = 100_000_000L;
     private static final long MAX_BRAKE_INTERVAL_NS = 1_000_000_000L;
-    record Summary(float km, int seconds, boolean speedExceeded, boolean hardBraking) {}
+    record Events(int speedAt, int brakeAt, int accelerationAt, int roadLimit) {
+        static final Events NONE = new Events(-1, -1, -1, 0);
+    }
+    record Summary(float km, int seconds, boolean speedExceeded, boolean hardBraking, Events events) {}
     record Checkpoint(boolean active, boolean incomplete, double meters, long movingNs,
-                      boolean speedExceeded, boolean hardBraking) {}
+                      boolean speedExceeded, boolean hardBraking, Events events,
+                      boolean destinationArrived, boolean diaryReady) {
+        Checkpoint(boolean active, boolean incomplete, double meters, long movingNs,
+                   boolean speedExceeded, boolean hardBraking) {
+            this(active, incomplete, meters, movingNs, speedExceeded, hardBraking, Events.NONE, false, false);
+        }
+    }
 
     private Boolean parked;
     private boolean active, incomplete, speedExceeded, hardBraking;
     private long startNs, previousNs, movingNs;
     private float previousSpeed;
     private double meters;
+    private int speedAt, brakeAt, accelerationAt, limitAtEvent, roadSpeedLimit;
+    private boolean destinationArrived, diaryReady;
 
     TripMeter(Checkpoint saved) {
         active = saved.active();
@@ -23,6 +35,12 @@ final class TripMeter {
         movingNs = saved.movingNs();
         speedExceeded = saved.speedExceeded();
         hardBraking = saved.hardBraking();
+        speedAt = saved.events().speedAt();
+        brakeAt = saved.events().brakeAt();
+        accelerationAt = saved.events().accelerationAt();
+        limitAtEvent = saved.events().roadLimit();
+        destinationArrived = saved.destinationArrived();
+        diaryReady = saved.diaryReady();
     }
 
     boolean gear(boolean park, long timeNs) {
@@ -34,9 +52,12 @@ final class TripMeter {
         } else {
             if (Boolean.TRUE.equals(parked) && !active) {
                 active = true;
+                destinationArrived = diaryReady = false;
                 incomplete = speedExceeded = hardBraking = false;
                 movingNs = 0;
                 meters = 0;
+                speedAt = brakeAt = accelerationAt = -1;
+                limitAtEvent = 0;
             } else if (parked == null && active) {
                 incomplete = true;
             }
@@ -44,6 +65,7 @@ final class TripMeter {
             previousNs = -1;
         }
         parked = park;
+        completeAtDestination();
         return true;
     }
 
@@ -52,7 +74,6 @@ final class TripMeter {
                 || timeNs < startNs || timeNs <= previousNs) return;
         float speed = Math.abs(metersPerSecond);
         if (!Float.isFinite(speed)) { incomplete = true; return; }
-        speedExceeded |= metersPerSecond > SPEED_CUE_KPH / 3.6f;
         if (previousNs < 0) {
             if (timeNs - startNs > MAX_GAP_NS) incomplete = true;
         } else {
@@ -62,13 +83,34 @@ final class TripMeter {
                 meters += (speed + previousSpeed) * 0.5 * (gap / 1e9);
                 movingNs += gap;
                 if (gap >= MIN_BRAKE_INTERVAL_NS && gap <= MAX_BRAKE_INTERVAL_NS) {
-                    hardBraking |= previousSpeed - speed >= HARD_BRAKING_MPS2 * (gap / 1e9);
+                    double acceleration = (speed - previousSpeed) / (gap / 1e9);
+                    if (acceleration <= -HARD_BRAKING_MPS2) {
+                        hardBraking = true;
+                        if (brakeAt < 0) brakeAt = eventPosition();
+                    }
+                    if (acceleration >= HARD_ACCELERATION_MPS2 && accelerationAt < 0) {
+                        accelerationAt = eventPosition();
+                    }
                 }
+            }
+        }
+        int threshold = roadSpeedLimit > 0 ? roadSpeedLimit : SPEED_CUE_KPH;
+        if (!incomplete && metersPerSecond > threshold / 3.6f) {
+            speedExceeded = true;
+            if (speedAt < 0) {
+                speedAt = eventPosition();
+                limitAtEvent = roadSpeedLimit;
             }
         }
         previousNs = timeNs;
         previousSpeed = speed;
     }
+
+    private int eventPosition() { return (int) Math.round(meters); }
+
+    void roadSpeedLimit(int kph) { roadSpeedLimit = kph >= 10 && kph <= 180 ? kph : 0; }
+
+    private Events events() { return new Events(speedAt, brakeAt, accelerationAt, limitAtEvent); }
 
     void signalLost(boolean gearSignal) {
         if (active && Boolean.FALSE.equals(parked)) incomplete = true;
@@ -82,18 +124,45 @@ final class TripMeter {
     boolean finish() {
         if (!parked() || !active) return false;
         active = false;
+        destinationArrived = false;
+        return true;
+    }
+
+    boolean destinationArrived() {
+        if (!active || destinationArrived) return false;
+        destinationArrived = true;
+        completeAtDestination();
+        return true;
+    }
+
+    boolean newRoute() {
+        roadSpeedLimit = 0;
+        if (!destinationArrived) return false;
+        destinationArrived = false;
+        return true;
+    }
+
+    private void completeAtDestination() {
+        if (destinationArrived && parked() && summary() != null && finish()) diaryReady = true;
+    }
+
+    boolean diaryReady() { return diaryReady && parked() && !active && summary() != null; }
+
+    boolean acknowledgeDiary() {
+        if (!diaryReady()) return false;
+        diaryReady = false;
         return true;
     }
 
     Summary summary() {
         if (incomplete || meters <= 0) return null;
         return new Summary((float) (meters / 1000), (int) (movingNs / 1_000_000_000L),
-                speedExceeded, hardBraking);
+                speedExceeded, hardBraking, events());
     }
 
     Checkpoint checkpoint() {
         // The last persisted totals cover completed legs through the most recent park event.
         return new Checkpoint(active, incomplete || (active && !parked()), meters, movingNs,
-                speedExceeded, hardBraking);
+                speedExceeded, hardBraking, events(), destinationArrived, diaryReady);
     }
 }

@@ -1,104 +1,81 @@
 package app.carbuddy;
 
-import android.content.Context;
+import android.car.VehiclePropertyIds;
+import android.car.hardware.CarPropertyValue;
+import android.car.hardware.property.CarPropertyManager;
 import android.os.Handler;
 import android.util.Log;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.Consumer;
-import ai.pleos.playground.vehicle.Vehicle;
-import ai.pleos.playground.vehicle.api.model.capability.AccessType;
-import ai.pleos.playground.vehicle.api.model.capability.CapabilityConfig;
-import ai.pleos.playground.vehicle.listener.EvBatteryStateOfChargeListener;
-import kotlin.Unit;
-import kotlin.jvm.functions.Function1;
 
-final class VehicleReader {
+final class VehicleReader implements CarPropertyManager.CarPropertyEventCallback {
     private static final String TAG = "CarBuddyVehicle";
+    private static final int GLOBAL_AREA = 0;
     private final Handler handler;
-    private final Vehicle vehicle;
+    private final CarPropertyManager manager;
+    private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final Consumer<Integer> fuelChanged;
+    private Float capacityMl;
     private boolean closed;
-    private EvBatteryStateOfChargeListener batteryListener;
 
-    VehicleReader(Context context, Handler handler) {
+    VehicleReader(CarPropertyManager manager, Handler handler, Consumer<Integer> fuelChanged) {
+        this.manager = manager;
         this.handler = handler;
-        vehicle = new Vehicle(context.getApplicationContext());
-        vehicle.initialize();
+        this.fuelChanged = fuelChanged;
     }
 
-    void watchBattery(Consumer<Integer> consumer) {
-        var ev = vehicle.getEvBattery();
-        ev.checkEvBatteryStateOfChargeCapabilities(config -> {
+    void watchFuel() {
+        try {
+            manager.registerCallback(this, VehiclePropertyIds.FUEL_LEVEL, 1f);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Fuel subscription unavailable", e);
+        }
+    }
+
+    @Override public void onChangeEvent(CarPropertyValue value) {
+        if (closed) return;
+        fuelChanged.accept(TripStory.fuelPercent(availableFloat(value), capacityMl));
+    }
+
+    @Override public void onErrorEvent(int property, int area) {
+        if (!closed) fuelChanged.accept(null);
+    }
+
+    void readFuel(Consumer<Integer> result) {
+        if (closed) return;
+        worker.execute(() -> {
+            Float capacity = read(VehiclePropertyIds.INFO_FUEL_CAPACITY);
+            Float level = read(VehiclePropertyIds.FUEL_LEVEL);
             handler.post(() -> {
-                if (closed || !readable(config)) return;
-                var listener = new EvBatteryStateOfChargeListener() {
-                    @Override public void onEvBatteryStateOfChargeUpdated(Integer value) {
-                        handler.post(() -> { if (!closed) consumer.accept(value); });
-                    }
-                    @Override public void onFailed(Exception e) { Log.w(TAG, "Battery update unavailable", e); }
-                };
-                try {
-                    ev.registerEvBatteryStateOfCharge(listener);
-                    batteryListener = listener;
-                } catch (RuntimeException e) { Log.w(TAG, "Cannot subscribe to battery", e); }
+                if (closed) return;
+                capacityMl = capacity;
+                result.accept(TripStory.fuelPercent(level, capacity));
             });
-            return Unit.INSTANCE;
-        }, e -> {
-            Log.w(TAG, "Cannot check battery subscription", e);
-            return Unit.INSTANCE;
         });
     }
 
-    private static boolean readable(CapabilityConfig config) {
-        AccessType access = config == null ? null : config.getAccessType();
-        return access == AccessType.READ || access == AccessType.READ_WRITE;
+    private Float read(int property) {
+        try {
+            return availableFloat(manager.getProperty(Float.class, property, GLOBAL_AREA));
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Fuel data unavailable for property " + property, e);
+            return null;
+        }
     }
 
-    void readBattery(Consumer<Integer> result) {
-        if (closed) return;
-        class Request {
-            boolean delivered;
-            void finish(Integer battery) {
-                if (!delivered && !closed) {
-                    delivered = true;
-                    result.accept(battery);
-                }
-            }
-        }
-        Request r = new Request();
-        handler.postDelayed(() -> r.finish(null), 3000);
-        var ev = vehicle.getEvBattery();
-        Function1<Exception, Unit> failure = e -> {
-            Log.w(TAG, "Battery unavailable", e);
-            handler.post(() -> r.finish(null));
-            return Unit.INSTANCE;
-        };
-        try {
-            ev.checkEvBatteryStateOfChargeCapabilities(config -> {
-                handler.post(() -> {
-                    if (closed || r.delivered) return;
-                    if (!readable(config)) {
-                        r.finish(null);
-                        return;
-                    }
-                    try {
-                        ev.getEvBatteryStateOfCharge(value -> {
-                            handler.post(() -> r.finish(value));
-                            return Unit.INSTANCE;
-                        }, failure);
-                    } catch (RuntimeException e) { failure.invoke(e); }
-                });
-                return Unit.INSTANCE;
-            }, failure);
-        } catch (RuntimeException e) { failure.invoke(e); }
+    private static Float availableFloat(CarPropertyValue<?> value) {
+        return value != null && value.getStatus() == CarPropertyValue.STATUS_AVAILABLE
+                && value.getValue() instanceof Float amount ? amount : null;
     }
 
     void close() {
         closed = true;
+        worker.shutdownNow();
         try {
-            if (batteryListener != null) vehicle.getEvBattery().unregisterEvBatteryStateOfCharge(batteryListener);
+            manager.unregisterCallback(this);
         } catch (RuntimeException e) {
-            Log.w(TAG, "Cannot unregister battery listener", e);
-        } finally {
-            vehicle.release();
+            Log.w(TAG, "Cannot unregister fuel listener", e);
         }
     }
 }

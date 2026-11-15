@@ -1,0 +1,13 @@
+<resources>
+    <color name="panel_surface">#FFFFFF</color>
+    <color name="panel_ink">#1C2127</color>
+    <color name="panel_muted">#505B65</color>
+    <color name="panel_line">#DCE1E5</color>
+    <color name="panel_selected">#EDF1F4</color>
+    <color name="panel_stage_top">#F6F7F8</color>
+    <color name="panel_stage_bottom">#E9EDF1</color>
+    <color name="panel_action">#222A32</color>
+    <color name="panel_on_action">#FFFFFF</color>
+    <color name="panel_focus">#345D80</color>
+    <color name="panel_ripple">#293C6687</color>
+</resources>

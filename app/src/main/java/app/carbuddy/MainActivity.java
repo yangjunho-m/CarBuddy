@@ -2,29 +2,34 @@ package app.carbuddy;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Dialog;
 import android.car.Car;
 import android.car.drivingstate.CarUxRestrictions;
 import android.car.drivingstate.CarUxRestrictionsManager;
 import android.car.hardware.property.CarPropertyManager;
+import android.content.ActivityNotFoundException;
+import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.content.res.ColorStateList;
-import android.graphics.Canvas;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
-import android.graphics.Paint;
-import android.graphics.Rect;
-import android.graphics.RectF;
 import android.graphics.Typeface;
+import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.media.AudioAttributes;
 import android.media.AudioManager;
 import android.media.AudioPlaybackConfiguration;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -32,17 +37,17 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import java.util.List;
+import java.util.Objects;
 
 public final class MainActivity extends Activity {
-    private static final int PAPER = 0xfff7f2e8, INK = 0xff183731, MUTED = 0xff46615a;
-    private static final int STAGE = 0xff173b35;
+    private int surface, ink, muted, line, selected, primary, onPrimary, focus, ripple;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Car car;
     private CarUxRestrictionsManager restrictions;
-    private TripRecorder recorder;
+    private final Runnable tripListener = this::render;
     private VehicleReader reader;
-    private Integer batteryLevel;
-    private boolean resumed, allowed, loading, open, musicPlaying;
+    private Integer fuelLevel;
+    private boolean resumed, allowed, loading, musicPlaying;
     private AudioManager audio;
     private final AudioManager.AudioPlaybackCallback playback = new AudioManager.AudioPlaybackCallback() {
         @Override public void onPlaybackConfigChanged(List<AudioPlaybackConfiguration> configs) {
@@ -50,23 +55,40 @@ public final class MainActivity extends Activity {
         }
     };
     private CharacterArt character;
+    private SharedPreferences preferences;
+    private boolean choosingCharacter, settingsOpen;
+    private boolean pendingOpenDiary;
+    private String floatingMessage = "";
     private Expression preview;
     private AlertDialog reactionDialog;
+    private Dialog diaryDialog;
     private int request;
-    private TextView headerStatus, mascotTitle, mascotNote, distance, duration, battery, storyCopy;
-    private Button finish, diary, refresh, reactions, speedPermission;
-    private LinearLayout characters;
+    private TextView parkedOnly, floatingHint, recordStatus, diaryFuel, diaryCopy;
+    private Button finish, arrivalDiary, previousDiary, refresh, speedPermission, floatingToggle, closePicker;
+    private LinearLayout dashboard, picker, settings;
     private final Button[] characterButtons = new Button[CharacterArt.values().length];
-    private Mascot mascot;
-    private LinearLayout metrics, controls;
+    private MascotView mascot;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        character = CharacterArt.saved(getPreferences(MODE_PRIVATE).getString("character", ""));
+        surface = getColor(R.color.panel_surface);
+        ink = getColor(R.color.panel_ink);
+        muted = getColor(R.color.panel_muted);
+        line = getColor(R.color.panel_line);
+        selected = getColor(R.color.panel_selected);
+        primary = getColor(R.color.panel_action);
+        onPrimary = getColor(R.color.panel_on_action);
+        focus = getColor(R.color.panel_focus);
+        ripple = getColor(R.color.panel_ripple);
+        preferences = CharacterArt.preferences(this);
+        character = CharacterArt.saved(preferences.getString(CharacterArt.CHOICE, ""));
+        choosingCharacter = !hasChosenCharacter() || (state != null && state.getBoolean("picker"));
+        pendingOpenDiary = state == null ? getIntent().getBooleanExtra(FloatingBuddyService.OPEN_DIARY, false)
+                : state.getBoolean("pending_diary");
+        settingsOpen = state == null ? !choosingCharacter && !pendingOpenDiary : state.getBoolean("settings");
         audio = getSystemService(AudioManager.class);
         build();
         car = Car.createCar(this, handler, Car.CAR_WAIT_TIMEOUT_DO_NOT_WAIT, (connected, ready) -> {
-            closeRecorder();
             restrictions = null;
             if (ready) {
                 try {
@@ -81,9 +103,20 @@ public final class MainActivity extends Activity {
                     android.util.Log.w("CarBuddy", "Driving restrictions unavailable", e);
                 }
             }
-            if (ready) startRecorder(connected);
             checkRestrictions();
         });
+    }
+
+    @Override protected void onStart() {
+        super.onStart();
+        FloatingBuddyService.addTripListener(tripListener);
+        FloatingBuddyService.activityVisible(true);
+    }
+
+    @Override protected void onStop() {
+        FloatingBuddyService.removeTripListener(tripListener);
+        FloatingBuddyService.activityVisible(false);
+        super.onStop();
     }
 
     @Override protected void onResume() {
@@ -93,8 +126,37 @@ public final class MainActivity extends Activity {
             audio.registerAudioPlaybackCallback(playback, handler);
             updateMusic();
         }
-        if (car != null && car.isConnected()) startRecorder(car);
         checkRestrictions();
+        syncFloatingBuddy();
+        render();
+    }
+
+    @Override protected void onSaveInstanceState(Bundle state) {
+        state.putBoolean("picker", choosingCharacter);
+        state.putBoolean("settings", settingsOpen);
+        state.putBoolean("pending_diary", pendingOpenDiary || diaryDialog != null);
+        super.onSaveInstanceState(state);
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        pendingOpenDiary |= intent.getBooleanExtra(FloatingBuddyService.OPEN_DIARY, false);
+        if (intent.getBooleanExtra(FloatingBuddyService.OPEN_SETTINGS, false)) {
+            choosingCharacter = false;
+            settingsOpen = true;
+        }
+        render();
+    }
+
+    @Override public void onBackPressed() {
+        if (choosingCharacter && hasChosenCharacter()) {
+            choosingCharacter = false;
+            render();
+        } else if (settingsOpen) {
+            closeSettings();
+        } else {
+            super.onBackPressed();
+        }
     }
 
     @Override protected void onPause() {
@@ -106,7 +168,6 @@ public final class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
-        closeRecorder();
         if (restrictions != null) restrictions.unregisterListener();
         restrictions = null;
         if (car != null) car.disconnect();
@@ -115,6 +176,10 @@ public final class MainActivity extends Activity {
 
     private boolean hasSpeedPermission() {
         return checkSelfPermission(Car.PERMISSION_SPEED) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private boolean hasFuelPermission() {
+        return checkSelfPermission(Car.PERMISSION_ENERGY) == PackageManager.PERMISSION_GRANTED;
     }
 
     private void updateMusic() {
@@ -128,30 +193,16 @@ public final class MainActivity extends Activity {
         if (allowed) render();
     }
 
-    private void startRecorder(Car connected) {
-        if (recorder != null || !hasSpeedPermission()) return;
-        try {
-            var manager = (CarPropertyManager) connected.getCarManager(Car.PROPERTY_SERVICE);
-            if (manager != null) {
-                recorder = new TripRecorder(manager, getSharedPreferences("journey", MODE_PRIVATE),
-                        this::render);
-                recorder.start();
-            }
-        } catch (RuntimeException e) {
-            android.util.Log.w("CarBuddy", "Trip recorder setup failed", e);
-        }
-    }
-
-    private void closeRecorder() {
-        if (recorder == null) return;
-        recorder.close();
-        recorder = null;
-    }
-
     @Override public void onRequestPermissionsResult(int code, String[] permissions, int[] grants) {
         super.onRequestPermissionsResult(code, permissions, grants);
-        if (code == 1 && car != null && car.isConnected()) startRecorder(car);
+        if (code == 1 && resumed) syncFloatingBuddy();
+        if (code == 2 && allowed) startFuel();
         render();
+    }
+
+    @Override protected void onActivityResult(int code, int result, Intent data) {
+        super.onActivityResult(code, result, data);
+        if (code == 3 && floatingEnabled() && syncFloatingBuddy()) finish();
     }
 
     private boolean checkRestrictions() {
@@ -171,25 +222,33 @@ public final class MainActivity extends Activity {
         allowed = next;
         if (!allowed) {
             request++;
-            loading = open = false;
+            loading = false;
             preview = null;
             if (reactionDialog != null) reactionDialog.dismiss();
-            batteryLevel = null;
+            if (diaryDialog != null) diaryDialog.dismiss();
+            fuelLevel = null;
             if (reader != null) { reader.close(); reader = null; }
         } else {
-            try {
-                reader = new VehicleReader(this, handler);
-                reader.watchBattery(level -> {
-                    if (!allowed || loading) return;
-                    batteryLevel = level;
-                    render();
-                });
-            } catch (RuntimeException e) {
-                android.util.Log.w("CarBuddy", "Vehicle SDK initialization failed", e);
-            }
-            load();
+            startFuel();
         }
         render();
+    }
+
+    private void startFuel() {
+        if (reader != null || car == null || !car.isConnected() || !hasFuelPermission()) return;
+        try {
+            var manager = (CarPropertyManager) car.getCarManager(Car.PROPERTY_SERVICE);
+            if (manager == null) return;
+            reader = new VehicleReader(manager, handler, level -> {
+                if (!allowed || loading || Objects.equals(fuelLevel, level)) return;
+                fuelLevel = level;
+                render();
+            });
+            reader.watchFuel();
+            load();
+        } catch (RuntimeException e) {
+            android.util.Log.w("CarBuddy", "Fuel reader setup failed", e);
+        }
     }
 
     private void load() {
@@ -197,183 +256,357 @@ public final class MainActivity extends Activity {
         int token = ++request;
         loading = true;
         render();
-        reader.readBattery(value -> {
+        reader.readFuel(value -> {
             if (token != request || !allowed) return;
-            batteryLevel = value;
+            fuelLevel = value;
             loading = false;
             render();
         });
     }
 
+    private boolean hasChosenCharacter() {
+        return preferences.getBoolean(CharacterArt.PICKED, false);
+    }
+
+    private boolean floatingEnabled() {
+        return preferences.getBoolean(CharacterArt.FLOATING, false) && Settings.canDrawOverlays(this);
+    }
+
+    private void chooseCharacter(CharacterArt choice) {
+        if (!checkRestrictions()) return;
+        boolean first = !hasChosenCharacter();
+        character = choice;
+        preview = null;
+        choosingCharacter = false;
+        settingsOpen = false;
+        SharedPreferences.Editor edits = preferences.edit().putString(CharacterArt.CHOICE, choice.name())
+                .putBoolean(CharacterArt.PICKED, true);
+        if (first) edits.putBoolean(CharacterArt.FLOATING, true);
+        edits.apply();
+        if (first && !Settings.canDrawOverlays(this)) openOverlaySettings();
+        if (syncFloatingBuddy() && floatingEnabled()) finish();
+        else {
+            settingsOpen = true;
+            render();
+        }
+    }
+
+    private void toggleFloatingBuddy() {
+        if (!checkRestrictions()) return;
+        boolean enable = !floatingEnabled();
+        preferences.edit().putBoolean(CharacterArt.FLOATING, enable).apply();
+        floatingMessage = "";
+        if (enable && !Settings.canDrawOverlays(this)) openOverlaySettings();
+        if (syncFloatingBuddy() && floatingEnabled()) finish();
+        else render();
+    }
+
+    private void openOverlaySettings() {
+        try {
+            startActivityForResult(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:" + getPackageName())), 3);
+        } catch (ActivityNotFoundException | SecurityException e) {
+            floatingMessage = "이 기기에서는 다른 앱 위에 표시하는 권한을 설정할 수 없어요.";
+        }
+    }
+
+    private boolean syncFloatingBuddy() {
+        Intent service = new Intent(this, FloatingBuddyService.class);
+        if (!hasChosenCharacter()) return false;
+        try {
+            startForegroundService(service);
+            if (floatingEnabled()) floatingMessage = "";
+            return true;
+        } catch (RuntimeException e) {
+            android.util.Log.w("CarBuddy", "Cannot start floating companion", e);
+            floatingMessage = "캐릭터를 띄우지 못했어요. 주차 중 다시 시도해 주세요.";
+            render();
+            return false;
+        }
+    }
+
+    private void closeSettings() {
+        if (floatingEnabled()) finish();
+        else {
+            settingsOpen = false;
+            render();
+        }
+    }
+
     private void build() {
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
-        scroll.setBackgroundColor(PAPER);
+        Configuration config = getResources().getConfiguration();
+        int gutter = config.screenWidthDp >= 780 ? 40 : 20;
+        int stageWidth = Math.min(392, Math.max(1, config.screenWidthDp - gutter * 2));
         LinearLayout outer = column();
-        int gutter = getResources().getConfiguration().screenWidthDp >= 900 ? 42 : 22;
-        outer.setPadding(dp(gutter), dp(22), dp(gutter), dp(26));
+        outer.setPadding(dp(gutter), dp(24), dp(gutter), dp(32));
         scroll.addView(outer);
         setContentView(scroll);
+        dashboard = column();
+        outer.addView(dashboard);
 
-        LinearLayout header = new LinearLayout(this);
-        header.setGravity(Gravity.CENTER_VERTICAL);
-        outer.addView(header, params(-1, -2, 0, 22));
-        TextView brand = text("카버디", 25, INK, true);
-        header.addView(brand, new LinearLayout.LayoutParams(0, -2, 1));
-        headerStatus = text("", 14, MUTED, true);
-        headerStatus.setGravity(Gravity.END);
-        header.addView(headerStatus);
+        parkedOnly = text("주차한 뒤 카버디를 이용할 수 있어요.", 22, muted, false);
+        parkedOnly.setBackground(buttonShape(surface, line, 1));
+        parkedOnly.setPadding(dp(16), dp(10), dp(16), dp(10));
+        dashboard.addView(parkedOnly, params(-2, -2, 12, 0));
 
-        boolean wide = getResources().getConfiguration().screenWidthDp >= 720
-                && getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(wide ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
-        outer.addView(content, new LinearLayout.LayoutParams(-1, -2));
-
-        LinearLayout stage = column();
-        stage.setBackground(round(STAGE, 22));
-        stage.setPadding(dp(26), dp(24), dp(26), dp(22));
-        LinearLayout.LayoutParams stageParams = wide
-                ? new LinearLayout.LayoutParams(0, -2, 1.04f) : params(-1, -2, 0, 24);
-        if (wide) stageParams.rightMargin = dp(24);
-        content.addView(stage, stageParams);
-        mascotTitle = text("", 26, Color.WHITE, true);
-        stage.addView(mascotTitle);
-        mascotNote = text("", 15, 0xffc2e0d5, false);
-        stage.addView(mascotNote, params(-1, -2, 6, 0));
-        mascot = new Mascot();
-        mascot.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        stage.addView(mascot, new LinearLayout.LayoutParams(-1, dp(wide ? 218 : 170)));
-        characters = column();
-        stage.addView(characters, params(-1, -2, 4, 0));
-        for (int start = 0; start < characterButtons.length; start += 2) {
-            LinearLayout row = new LinearLayout(this);
-            characters.addView(row, params(-1, -2, 0, 6));
-            for (int index = start; index < start + 2; index++) {
-                CharacterArt option = CharacterArt.values()[index];
-                Button choice = button(option.label, STAGE, Color.WHITE, 0xff73968a);
-                choice.setPadding(dp(6), 0, dp(6), 0);
-                choice.setSingleLine(true);
-                LinearLayout.LayoutParams choiceSize = new LinearLayout.LayoutParams(0, dp(48), 1f);
-                if (index == start) choiceSize.setMarginEnd(dp(8));
-                row.addView(choice, choiceSize);
-                characterButtons[index] = choice;
-                choice.setOnClickListener(v -> {
-                    if (!checkRestrictions()) return;
-                    character = option;
-                    getPreferences(MODE_PRIVATE).edit().putString("character", option.name()).apply();
+        mascot = new MascotView(this);
+        mascot.setForeground(buttonBackground(Color.TRANSPARENT, 0, false));
+        mascot.setFocusable(true);
+        mascot.setOnClickListener(v -> {
+            if (checkRestrictions()) {
+                if (settingsOpen) closeSettings();
+                else {
+                    settingsOpen = true;
                     render();
-                });
+                }
             }
-        }
-        reactions = button("표정 미리보기", STAGE, 0xffd4ebe1, 0xff73968a);
-        reactions.setOnClickListener(v -> chooseExpression());
-        stage.addView(reactions, params(-1, dp(48), 3, 0));
+        });
+        dashboard.addView(mascot, params(dp(stageWidth), dp(Math.min(280, stageWidth * .74f)), 0, 0));
 
-        LinearLayout panel = column();
-        panel.setPadding(dp(4), dp(wide ? 8 : 0), dp(4), 0);
-        content.addView(panel, wide ? new LinearLayout.LayoutParams(0, -2, 1f) : params(-1, -2, 0, 0));
-        panel.addView(text("이번 주행 일기", 33, INK, true));
-        storyCopy = text("", 19, MUTED, false);
-        storyCopy.setLineSpacing(dp(4), 1f);
-        storyCopy.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-        panel.addView(storyCopy, params(-1, -2, 12, 22));
-        metrics = new LinearLayout(this);
-        metrics.setBackground(round(0xffe9e9dc, 16));
-        metrics.setPadding(dp(15), dp(13), dp(12), dp(13));
-        distance = metric("주행 거리");
-        duration = metric("주행 시간");
-        battery = metric("남은 배터리");
-        panel.addView(metrics, params(-1, -2, 0, 22));
-        controls = new LinearLayout(this);
-        controls.setOrientation(LinearLayout.VERTICAL);
-        finish = button("주행 끝내기", INK, Color.WHITE, 0);
+        arrivalDiary = button("오늘의 주행일기", primary, onPrimary, 0);
+        arrivalDiary.setOnClickListener(v -> openCurrentDiary());
+        dashboard.addView(arrivalDiary, params(dp(stageWidth), -2, 12, 0));
+
+        settings = column();
+        settings.setPadding(dp(14), dp(14), dp(14), dp(14));
+        settings.setBackground(buttonShape(surface, line, 1));
+        dashboard.addView(settings, params(dp(stageWidth), -2, 16, 0));
+        Button changeCharacter = button("캐릭터 선택하기", surface, ink, line);
+        changeCharacter.setOnClickListener(v -> {
+            if (checkRestrictions()) {
+                choosingCharacter = true;
+                render();
+            }
+        });
+        settings.addView(changeCharacter, params(-1, -2, 0, 8));
+        Button reactions = button("표정 미리보기", surface, ink, line);
+        reactions.setOnClickListener(v -> chooseExpression());
+        settings.addView(reactions, params(-1, -2, 0, 8));
+        floatingToggle = button("다른 앱 위에 표시", surface, ink, line);
+        floatingToggle.setOnClickListener(v -> toggleFloatingBuddy());
+        settings.addView(floatingToggle, params(-1, -2, 0, 0));
+        floatingHint = text("", 17, muted, false);
+        settings.addView(floatingHint, params(-1, -2, 8, 0));
+        settings.addView(divider(), params(-1, dp(1), 16, 16));
+        recordStatus = text("", 18, muted, false);
+        settings.addView(recordStatus, params(-1, -2, 0, 10));
+        finish = button("주행 끝내기", surface, ink, line);
         finish.setOnClickListener(v -> {
+            TripRecorder recorder = FloatingBuddyService.trip();
             if (checkRestrictions() && recorder != null && recorder.finish()) {
-                open = recorder.summary() != null;
                 render();
+                openCurrentDiary();
             }
         });
-        controls.addView(finish, params(-1, dp(56), 0, 8));
-        diary = button("일기 열기", INK, Color.WHITE, 0);
-        diary.setOnClickListener(v -> {
-            if (checkRestrictions() && recorder != null && recorder.parked() && !recorder.active()
-                    && recorder.summary() != null) {
-                open = !open;
-                render();
-            }
+        settings.addView(finish, params(-1, -2, 0, 8));
+        previousDiary = button("최근 주행일기", surface, ink, line);
+        previousDiary.setOnClickListener(v -> openCurrentDiary());
+        settings.addView(previousDiary, params(-1, -2, 0, 8));
+        refresh = button("연료 잔량 다시 읽기", surface, ink, line);
+        refresh.setOnClickListener(v -> {
+            if (!checkRestrictions()) return;
+            if (!hasFuelPermission()) requestPermissions(new String[]{Car.PERMISSION_ENERGY}, 2);
+            else if (reader == null) startFuel();
+            else load();
         });
-        controls.addView(diary, params(-1, dp(56), 0, 8));
-        refresh = button("배터리 다시 읽기", PAPER, INK, 0xff748a7e);
-        refresh.setOnClickListener(v -> { if (checkRestrictions()) load(); });
-        controls.addView(refresh, params(-1, dp(52), 0, 0));
-        speedPermission = button("주행 기록 권한 허용", PAPER, INK, 0xff748a7e);
+        settings.addView(refresh, params(-1, -2, 0, 0));
+        speedPermission = button("주행 기록 권한 허용", surface, ink, line);
         speedPermission.setOnClickListener(v -> {
             if (checkRestrictions()) requestPermissions(new String[]{Car.PERMISSION_SPEED}, 1);
         });
-        controls.addView(speedPermission, params(-1, dp(52), 8, 0));
-        panel.addView(controls);
+        settings.addView(speedPermission, params(-1, -2, 8, 0));
+        buildPicker(outer, config.screenWidthDp >= 780);
         render();
     }
 
+    private void buildPicker(LinearLayout outer, boolean wide) {
+        picker = column();
+        int width = Math.min(1140, getResources().getConfiguration().screenWidthDp - (wide ? 80 : 40));
+        picker.setBackground(buttonShape(surface, line, 1));
+        picker.setPadding(dp(wide ? 32 : 20), dp(24), dp(wide ? 32 : 20), dp(28));
+        outer.addView(picker, params(dp(width), -2, 0, 0));
+
+        LinearLayout header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        picker.addView(header, params(-1, -2, 0, 20));
+        header.addView(text("카버디", 34, ink, true), new LinearLayout.LayoutParams(0, -2, 1f));
+        closePicker = button("닫기", surface, ink, line);
+        closePicker.setOnClickListener(v -> {
+            choosingCharacter = false;
+            render();
+        });
+        header.addView(closePicker, params(-2, -2, 0, 0));
+        picker.addView(divider(), params(-1, dp(1), 0, 34));
+        picker.addView(text("함께할 캐릭터를 골라 주세요", 34, ink, true));
+        picker.addView(text("선택한 캐릭터는 나중에 바꿀 수 있어요.", 20, muted, false),
+                params(-1, -2, 8, 26));
+
+        int perRow = wide ? 4 : 2;
+        CharacterArt[] options = CharacterArt.values();
+        for (int start = 0; start < options.length; start += perRow) {
+            LinearLayout row = new LinearLayout(this);
+            picker.addView(row, params(-1, -2, start == 0 ? 0 : 12, 0));
+            for (int index = start; index < Math.min(start + perRow, options.length); index++) {
+                CharacterArt option = options[index];
+                Button choice = button(option.label, surface, ink, line);
+                choice.setPadding(dp(8), dp(18), dp(8), dp(16));
+                choice.setCompoundDrawables(null, thumbnail(option, wide ? 154 : 102), null, null);
+                choice.setCompoundDrawablePadding(dp(12));
+                choice.setBackground(buttonBackground(surface, line, true));
+                LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(0, -2, 1f);
+                if (index > start) size.setMarginStart(dp(12));
+                row.addView(choice, size);
+                characterButtons[index] = choice;
+                choice.setOnClickListener(v -> chooseCharacter(option));
+            }
+        }
+    }
+
     private void render() {
+        TripRecorder recorder = FloatingBuddyService.trip();
         boolean parked = recorder != null && recorder.parked();
         boolean active = recorder != null && recorder.active();
         boolean incomplete = recorder != null && recorder.incomplete();
         TripMeter.Summary measured = parked ? recorder.summary() : null;
-        TripStory entry = new TripStory(batteryLevel, measured == null ? null : measured.km(),
+        boolean diaryAvailable = allowed && parked && !active && measured != null;
+        boolean arrival = diaryAvailable && recorder.diaryReady();
+        boolean launchDiary = pendingOpenDiary && allowed && parked;
+        if (launchDiary) pendingOpenDiary = false;
+        boolean diaryInFront = diaryDialog != null || (launchDiary && diaryAvailable);
+        boolean showPicker = allowed && choosingCharacter && !arrival && !diaryInFront;
+        boolean showMascot = allowed && !showPicker && !arrival && !diaryInFront;
+        closePicker.setVisibility(hasChosenCharacter() ? View.VISIBLE : View.GONE);
+        picker.setVisibility(showPicker ? View.VISIBLE : View.GONE);
+        dashboard.setVisibility(showPicker ? View.GONE : View.VISIBLE);
+        parkedOnly.setVisibility(allowed ? View.GONE : View.VISIBLE);
+        mascot.setVisibility(showMascot ? View.VISIBLE : View.GONE);
+        TripStory entry = new TripStory(fuelLevel, measured == null ? null : measured.km(),
                 measured == null ? null : measured.seconds());
-        Expression face = preview != null ? preview : automaticExpression(entry, measured);
-        headerStatus.setText(allowed ? parked ? "주차 중  ·  Pleos Vehicle" : "Pleos Vehicle"
-                : "주차 시 이용 가능");
-        mascotTitle.setText(!allowed ? "안전하게 도착하면 만나!" : character.label);
-        mascotNote.setText(!allowed ? "주차한 뒤 다시 열어 줘."
-                : (preview != null ? "미리보기 · " : "") + face.note);
-        mascot.setVisibility(allowed ? View.VISIBLE : View.GONE);
-        if (allowed) mascot.show(character, face);
-        characters.setVisibility(allowed ? View.VISIBLE : View.GONE);
-        reactions.setVisibility(allowed ? View.VISIBLE : View.GONE);
-        for (Button choice : characterButtons) {
-            boolean selected = choice.getText().toString().equals(character.label);
-            choice.setSelected(selected);
-            choice.setTextColor(selected ? INK : Color.WHITE);
-            choice.setBackgroundTintList(selected ? ColorStateList.valueOf(0xffc9e6d6) : null);
+        if (showMascot) {
+            Expression face = preview != null ? preview : automaticExpression(entry, measured);
+            mascot.show(character, face);
+            mascot.setContentDescription(character.label + ". " + face.note
+                    + (settingsOpen ? " 설정 닫기" : " 설정 열기"));
         }
-        metrics.setVisibility(allowed ? View.VISIBLE : View.GONE);
-        controls.setVisibility(allowed ? View.VISIBLE : View.GONE);
-        storyCopy.setText(!allowed ? "차량의 주행 제한이 해제되면 일기를 볼 수 있어요."
-                : !hasSpeedPermission() ? "주행 기록 권한을 허용한 뒤 출발하면 기록을 시작해요."
-                : !parked ? "기어를 P로 바꾸면 주행 기록을 확인할 수 있어요."
-                : active && incomplete ? "주행 신호가 끊겨 전체 일기를 만들 수 없어요. 주행 끝내기로 이번 기록을 정리해 주세요."
-                : active ? "중간에 잠깐 주차해도 기록이 이어져요. 목적지에서 주행 끝내기를 눌러 주세요."
-                : incomplete ? "이번 주행의 신호가 끊겼어요. 다음 출발부터 새로 기록해요."
-                : measured == null ? "출발하면 기록을 시작해요. 목적지에 주차한 뒤 주행 끝내기를 눌러 주세요."
-                : open ? entry.text() + motionNote(measured) : character.label + "에게 이번 이동 이야기를 들어보세요.");
-        distance.setText(entry.distance());
-        duration.setText(entry.duration());
-        battery.setText(entry.battery() == null ? "—" : entry.battery() + "%");
-        finish.setVisibility(allowed && parked && active ? View.VISIBLE : View.GONE);
-        diary.setText(open ? "일기 닫기" : "일기 열기");
-        diary.setVisibility(allowed && parked && !active && measured != null ? View.VISIBLE : View.GONE);
+        arrivalDiary.setVisibility(arrival && !diaryInFront ? View.VISIBLE : View.GONE);
+        settings.setVisibility(allowed && settingsOpen && !arrival && !diaryInFront ? View.VISIBLE : View.GONE);
+        floatingToggle.setText(floatingEnabled() ? "다른 앱 위 표시 끄기" : "다른 앱 위에 표시");
+        floatingHint.setText(floatingMessage);
+        floatingHint.setVisibility(floatingMessage.isEmpty() ? View.GONE : View.VISIBLE);
+        for (int i = 0; i < characterButtons.length; i++) characterButtons[i].setSelected(i == character.ordinal());
+        String status = !hasSpeedPermission() ? "권한을 허용하면 다음 출발부터 기록해요."
+                : active && incomplete ? "주행 신호가 끊겼어요. 주행 끝내기로 이번 기록을 정리해 주세요."
+                : active ? "기록 중이에요. 중간에 주차해도 계속 이어져요."
+                : incomplete ? "다음 출발부터 새로 기록해요." : "";
+        recordStatus.setText(status);
+        recordStatus.setVisibility(status.isEmpty() ? View.GONE : View.VISIBLE);
+        finish.setVisibility(parked && active ? View.VISIBLE : View.GONE);
+        previousDiary.setVisibility(diaryAvailable && !arrival ? View.VISIBLE : View.GONE);
+        refresh.setText(!hasFuelPermission() ? "연료 정보 권한 허용"
+                : loading ? "연료 잔량 확인 중" : fuelLevel == null ? "연료 잔량 다시 읽기"
+                : "남은 연료 " + fuelLevel + "% · 다시 읽기");
         refresh.setEnabled(allowed && !loading);
-        speedPermission.setVisibility(allowed && !hasSpeedPermission() ? View.VISIBLE : View.GONE);
+        speedPermission.setVisibility(!hasSpeedPermission() ? View.VISIBLE : View.GONE);
+        if (diaryDialog != null) {
+            if (diaryAvailable) updateDiary(entry, measured);
+            else diaryDialog.dismiss();
+        }
+        if (launchDiary && diaryAvailable) {
+            choosingCharacter = settingsOpen = false;
+            picker.setVisibility(View.GONE);
+            dashboard.setVisibility(View.VISIBLE);
+            settings.setVisibility(View.GONE);
+            showDiary(recorder, entry, measured);
+        }
+    }
+
+    private void openCurrentDiary() {
+        if (checkRestrictions()) {
+            pendingOpenDiary = true;
+            render();
+        }
+    }
+
+    private void showDiary(TripRecorder recorder, TripStory entry, TripMeter.Summary measured) {
+        if (diaryDialog != null) return;
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+        dialog.setTitle("오늘의 주행일기");
+        int width = Math.min(880, getResources().getConfiguration().screenWidthDp - 40);
+        int inset = width >= 540 ? 32 : 20;
+        ScrollView scroll = new ScrollView(this);
+        scroll.setBackground(buttonShape(surface, line, 1));
+        scroll.setClipToOutline(true);
+        LinearLayout content = column();
+        content.setPadding(dp(inset), dp(22), dp(inset), dp(24));
+        scroll.addView(content);
+        dialog.setContentView(scroll);
+
+        LinearLayout header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        TextView title = text("오늘의 주행일기", width >= 540 ? 36 : 27, ink, true);
+        title.setAccessibilityHeading(true);
+        header.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        Button close = button("닫기", surface, ink, line);
+        close.setOnClickListener(v -> dialog.dismiss());
+        header.addView(close);
+        content.addView(header, params(-1, -2, 0, 18));
+
+        LinearLayout metrics = new LinearLayout(this);
+        metric(metrics, "주행 거리").setText(entry.distance());
+        metric(metrics, "주행 시간").setText(entry.duration());
+        diaryFuel = metric(metrics, "남은 연료");
+        content.addView(metrics, params(-1, -2, 0, 20));
+        content.addView(divider(), params(-1, dp(1), 0, 22));
+
+        LinearLayout story = new LinearLayout(this);
+        boolean wide = width >= 600;
+        story.setOrientation(wide ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
+        story.setGravity(Gravity.CENTER_VERTICAL);
+        MascotView diaryMascot = new MascotView(this);
+        diaryMascot.show(character, automaticExpression(entry, measured));
+        diaryMascot.setContentDescription(character.label);
+        var imageSize = params(dp(wide ? 232 : 156), dp(wide ? 184 : 116), 0, wide ? 0 : 8);
+        imageSize.setMarginEnd(dp(wide ? 24 : 0));
+        story.addView(diaryMascot, imageSize);
+        diaryCopy = text("", wide ? 24 : 22, ink, false);
+        diaryCopy.setLineSpacing(dp(6), 1f);
+        story.addView(diaryCopy, wide ? new LinearLayout.LayoutParams(0, -2, 1) : params(-1, -2, 0, 0));
+        content.addView(story);
+        updateDiary(entry, measured);
+
+        diaryDialog = dialog;
+        dialog.setOnDismissListener(v -> {
+            if (diaryDialog == dialog) {
+                diaryDialog = null;
+                diaryFuel = diaryCopy = null;
+                if (resumed && !isChangingConfigurations() && floatingEnabled()) finish();
+                else render();
+            }
+        });
+        var window = dialog.getWindow();
+        window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        window.setDimAmount(.36f);
+        dialog.show();
+        window.setLayout(dp(width), -2);
+        recorder.acknowledgeDiary();
+    }
+
+    private void updateDiary(TripStory entry, TripMeter.Summary measured) {
+        diaryFuel.setText(!hasFuelPermission() ? "권한 필요" : loading ? "읽는 중"
+                : entry.fuel() == null ? "조회 불가" : entry.fuel() + "%");
+        diaryCopy.setText(entry.text() + "\n" + entry.feedback(measured));
     }
 
     private Expression automaticExpression(TripStory entry, TripMeter.Summary measured) {
-        if (entry.low()) return Expression.BATTERY;
+        if (entry.low()) return Expression.FUEL_LOW;
         if (musicPlaying) return Expression.MUSIC;
         if (measured != null && measured.hardBraking()) return Expression.BRAKE;
         if (measured != null && measured.speedExceeded()) return Expression.SPEED;
+        if (measured != null && measured.events().accelerationAt() >= 0) return Expression.ACCELERATION;
         return Expression.NEUTRAL;
-    }
-
-    private String motionNote(TripMeter.Summary measured) {
-        if (measured == null) return "";
-        String note = measured.hardBraking() ? "\n급감속이 있었어." : "";
-        if (measured.speedExceeded()) {
-            note += "\n미리 정한 " + TripMeter.SPEED_CUE_KPH + " km/h를 넘은 구간이 있었어.";
-        }
-        return note;
     }
 
     private void chooseExpression() {
@@ -392,16 +625,33 @@ public final class MainActivity extends Activity {
                 }).setNegativeButton("닫기", null).create();
         reactionDialog.setOnDismissListener(dialog -> reactionDialog = null);
         reactionDialog.show();
+        var window = reactionDialog.getWindow();
+        if (window != null) {
+            int availableWidth = getResources().getConfiguration().screenWidthDp;
+            window.setLayout(dp(Math.min(520, availableWidth - 24)), -2);
+        }
     }
 
-    private TextView metric(String label) {
+    private TextView metric(LinearLayout metrics, String label) {
+        if (metrics.getChildCount() != 0) {
+            LinearLayout.LayoutParams rule = new LinearLayout.LayoutParams(dp(1), -1);
+            rule.setMarginEnd(dp(12));
+            metrics.addView(divider(), rule);
+        }
         LinearLayout box = column();
-        box.setPadding(0, 0, dp(5), 0);
-        box.addView(text(label, 13, MUTED, false));
-        TextView value = text("—", 20, INK, true);
-        box.addView(value, params(-1, -2, 5, 0));
+        box.setPaddingRelative(0, 0, dp(8), 0);
+        box.addView(text(label, 16, muted, true));
+        TextView value = text("—", 31, ink, true);
+        value.setFontFeatureSettings("'tnum'");
+        box.addView(value, params(-1, -2, 8, 0));
         metrics.addView(box, new LinearLayout.LayoutParams(0, -2, 1));
         return value;
+    }
+
+    private View divider() {
+        View rule = new View(this);
+        rule.setBackgroundColor(line);
+        return rule;
     }
 
     private int dp(float size) { return Math.round(size * getResources().getDisplayMetrics().density); }
@@ -424,97 +674,50 @@ public final class MainActivity extends Activity {
         if (bold) view.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
         return view;
     }
-    private GradientDrawable round(int fill, int radius) {
+    private GradientDrawable buttonShape(int fill, int outline, int outlineDp) {
         GradientDrawable d = new GradientDrawable();
         d.setColor(fill);
-        d.setCornerRadius(dp(radius));
+        d.setCornerRadius(dp(10));
+        if (outline != 0) d.setStroke(dp(outlineDp), outline);
         return d;
     }
-    private Button button(String label, int fill, int ink, int outline) {
+
+    private RippleDrawable buttonBackground(int fill, int outline, boolean characterChoice) {
+        StateListDrawable states = new StateListDrawable();
+        if (characterChoice) {
+            states.addState(new int[]{android.R.attr.state_selected}, buttonShape(selected, focus, 2));
+        }
+        states.addState(new int[]{android.R.attr.state_focused}, buttonShape(fill, focus, 2));
+        states.addState(new int[]{}, buttonShape(fill, outline, 1));
+        return new RippleDrawable(ColorStateList.valueOf(ripple), states, buttonShape(Color.WHITE, 0, 0));
+    }
+
+    private Button button(String label, int fill, int textColor, int outline) {
         Button button = new Button(this);
         button.setText(label);
-        button.setTextColor(ink);
-        button.setTextSize(16);
+        button.setTextColor(new ColorStateList(new int[][]{new int[]{-android.R.attr.state_enabled}, new int[]{}},
+                new int[]{muted, textColor}));
+        button.setTextSize(20);
+        button.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         button.setAllCaps(false);
-        button.setPadding(dp(16), 0, dp(16), 0);
+        button.setMinimumHeight(dp(56));
+        button.setMinHeight(dp(56));
+        button.setMinimumWidth(dp(48));
+        button.setMinWidth(dp(48));
+        button.setPadding(dp(16), dp(11), dp(16), dp(11));
         button.setStateListAnimator(null);
-        GradientDrawable shape = round(fill, 14);
-        if (outline != 0) shape.setStroke(dp(1), outline);
-        button.setBackground(new RippleDrawable(ColorStateList.valueOf(0x447ba992), shape, null));
+        button.setBackground(buttonBackground(fill, outline, false));
         return button;
     }
 
-    private enum Expression {
-        NEUTRAL("", "지금 차의 상태를 함께 살펴봐요."),
-        BATTERY("배터리 부족", "에너지가 적어서 땀이 나요."),
-        MUSIC("음악 재생", "음악이 들리니 신나요."),
-        BRAKE("급감속", "갑자기 속도가 줄어 깜짝 놀랐어요."),
-        SPEED("속도 초과", "정해 둔 속도를 넘어서 긴장했어요.");
-
-        final String label;
-        final String note;
-
-        Expression(String label, String note) {
-            this.label = label;
-            this.note = note;
-        }
-    }
-
-    private enum CharacterArt {
-        MOMOKA("모모카", R.drawable.momoka),
-        DINOCA("디노카", R.drawable.dinoca),
-        NYANGCA("냥카", R.drawable.nyangca),
-        POCA("포카", R.drawable.poca);
-
-        final String label;
-        final int image;
-
-        CharacterArt(String label, int image) {
-            this.label = label;
-            this.image = image;
-        }
-
-        static CharacterArt saved(String name) {
-            for (CharacterArt choice : values()) {
-                if (choice.name().equals(name)) return choice;
-            }
-            return MOMOKA;
-        }
-    }
-
-    private final class Mascot extends View {
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-        private final Rect source = new Rect();
-        private final RectF destination = new RectF();
-        private CharacterArt current;
-        private Expression face;
-        private Bitmap sheet;
-
-        Mascot() { super(MainActivity.this); }
-
-        void show(CharacterArt next, Expression expression) {
-            if (current == next && face == expression) return;
-            if (current != next) {
-                sheet = BitmapFactory.decodeResource(getResources(), next.image);
-                current = next;
-            }
-            face = expression;
-            invalidate();
-        }
-
-        @Override protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            if (sheet == null) return;
-            int cellWidth = sheet.getWidth() / 2;
-            int cellHeight = sheet.getHeight() / 3;
-            int left = face.ordinal() % 2 * cellWidth;
-            int top = face.ordinal() / 2 * cellHeight;
-            source.set(left, top, left + cellWidth, top + cellHeight);
-            float scale = Math.min(getWidth() / (float) cellWidth, getHeight() / (float) cellHeight);
-            float width = cellWidth * scale, height = cellHeight * scale;
-            float x = (getWidth() - width) / 2, y = (getHeight() - height) / 2;
-            destination.set(x, y, x + width, y + height);
-            canvas.drawBitmap(sheet, source, destination, paint);
-        }
+    private BitmapDrawable thumbnail(CharacterArt option, int heightDp) {
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inSampleSize = 2;
+        Bitmap atlas = BitmapFactory.decodeResource(getResources(), option.image, options);
+        Bitmap firstFace = Bitmap.createBitmap(atlas, 0, 0, atlas.getWidth() / 2, atlas.getHeight() / 3);
+        BitmapDrawable icon = new BitmapDrawable(getResources(), firstFace);
+        int height = dp(heightDp);
+        icon.setBounds(0, 0, Math.round(height * (float) firstFace.getWidth() / firstFace.getHeight()), height);
+        return icon;
     }
 }

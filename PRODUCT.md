@@ -8,7 +8,7 @@ android
 
 ## Stack
 
-Pleos Connect용 네이티브 Android Automotive OS 앱. 구현 언어는 Java, 차량 연동은 공식 Vehicle SDK.
+Pleos Connect용 네이티브 Android Automotive OS 앱. Java로 구현하고 표준 Android Automotive 차량 API로 차량 상태를 읽는다.
 
 ## Users
 
@@ -20,4 +20,4 @@ Pleos Connect용 네이티브 Android Automotive OS 앱. 구현 언어는 Java, 
 
 ## Capabilities and Constraints
 
-주차 상태와 주행 제한이 확인될 때만 일기를 제공한다. 속도와 기어 신호로 각 구간의 거리와 움직인 시간을 기록하고, 중간 주차 후 다시 출발하면 이전 구간과 합산한다. 목적지에 주차한 뒤 주행 끝내기를 누르면 전체 일기를 보여준다.
+주차 상태와 주행 제한이 확인될 때만 일기를 제공한다. 속도와 기어 신호로 거리, 움직인 시간, 급가속·급감속·속도 이벤트를 기록하고 중간 주차 후 이전 구간과 합산한다. Pleos 내비게이션의 최종 도착과 주차를 함께 확인하면 일기를 제안한다. 도착 신호가 없는 환경에서는 주행 끝내기로 전체 일기를 열 수 있다.
