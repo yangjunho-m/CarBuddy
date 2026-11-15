@@ -22,13 +22,8 @@ record TripStory(Integer battery, Float km, Integer seconds) {
         if (seconds == null) return "—";
         if (seconds < 60) return seconds == 0 && km != null && km > 0 ? "1초 미만" : seconds + "초";
         int minutes = seconds / 60;
-        if (minutes < 60) return minutes + "분";
-        return minutes / 60 + "시간 " + minutes % 60 + "분";
-    }
-
-    TripStory withMeasured(TripMeter.Summary measured) {
-        if (measured == null || (km != null && km > 0 && seconds != null && seconds > 0)) return this;
-        return new TripStory(battery, measured.km(), measured.seconds());
+        String minuteLabel = minutes < 60 ? minutes + "분" : minutes / 60 + "시간 " + minutes % 60 + "분";
+        return seconds % 60 == 0 ? minuteLabel : minuteLabel + " " + seconds % 60 + "초";
     }
 
     String text() {

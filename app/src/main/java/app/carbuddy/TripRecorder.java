@@ -4,17 +4,24 @@ import android.car.VehicleGear;
 import android.car.VehiclePropertyIds;
 import android.car.hardware.CarPropertyValue;
 import android.car.hardware.property.CarPropertyManager;
+import android.content.SharedPreferences;
 import android.util.Log;
 
 final class TripRecorder implements CarPropertyManager.CarPropertyEventCallback {
     private final CarPropertyManager manager;
-    private final TripMeter meter = new TripMeter();
+    private final SharedPreferences saved;
+    private final TripMeter meter;
     private final Runnable changed;
     private boolean running;
 
-    TripRecorder(CarPropertyManager manager, Runnable changed) {
+    TripRecorder(CarPropertyManager manager, SharedPreferences saved, Runnable changed) {
         this.manager = manager;
+        this.saved = saved;
         this.changed = changed;
+        meter = new TripMeter(new TripMeter.Checkpoint(saved.getBoolean("active", false),
+                saved.getBoolean("incomplete", false),
+                Double.longBitsToDouble(saved.getLong("meters", 0)), saved.getLong("moving_ns", 0),
+                saved.getBoolean("speed_exceeded", false), saved.getBoolean("hard_braking", false)));
     }
 
     void start() {
@@ -39,24 +46,46 @@ final class TripRecorder implements CarPropertyManager.CarPropertyEventCallback 
             meter.speed(value.getTimestamp(), speed);
         } else if (value.getPropertyId() == VehiclePropertyIds.GEAR_SELECTION
                 && value.getValue() instanceof Integer gear) {
-            var before = meter.last();
-            if (gear == VehicleGear.GEAR_UNKNOWN) meter.invalidate();
-            else meter.gear(gear == VehicleGear.GEAR_PARK, value.getTimestamp());
-            if (before != meter.last()) changed.run();
+            if (gear == VehicleGear.GEAR_UNKNOWN) {
+                onErrorEvent(value.getPropertyId(), value.getAreaId());
+            } else if (meter.gear(gear == VehicleGear.GEAR_PARK, value.getTimestamp())) {
+                save();
+                changed.run();
+            }
         }
     }
 
     @Override public void onErrorEvent(int property, int area) {
         if (!running) return;
-        meter.invalidate();
+        meter.signalLost(property == VehiclePropertyIds.GEAR_SELECTION);
+        save();
         changed.run();
     }
 
-    TripMeter.Summary last() { return meter.last(); }
+    boolean active() { return meter.active(); }
+    boolean parked() { return meter.parked(); }
+    boolean incomplete() { return meter.incomplete(); }
+    TripMeter.Summary summary() { return meter.summary(); }
+
+    boolean finish() {
+        if (!meter.finish()) return false;
+        save();
+        return true;
+    }
+
+    private void save() {
+        TripMeter.Checkpoint checkpoint = meter.checkpoint();
+        saved.edit().putBoolean("active", checkpoint.active())
+                .putBoolean("incomplete", checkpoint.incomplete())
+                .putLong("meters", Double.doubleToRawLongBits(checkpoint.meters()))
+                .putLong("moving_ns", checkpoint.movingNs())
+                .putBoolean("speed_exceeded", checkpoint.speedExceeded())
+                .putBoolean("hard_braking", checkpoint.hardBraking())
+                .apply();
+    }
 
     void close() {
         running = false;
-        meter.invalidate();
         try {
             manager.unregisterCallback(this);
         } catch (RuntimeException e) {

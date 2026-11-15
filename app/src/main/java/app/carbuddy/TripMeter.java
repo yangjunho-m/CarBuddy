@@ -7,38 +7,53 @@ final class TripMeter {
     private static final long MIN_BRAKE_INTERVAL_NS = 100_000_000L;
     private static final long MAX_BRAKE_INTERVAL_NS = 1_000_000_000L;
     record Summary(float km, int seconds, boolean speedExceeded, boolean hardBraking) {}
+    record Checkpoint(boolean active, boolean incomplete, double meters, long movingNs,
+                      boolean speedExceeded, boolean hardBraking) {}
 
-    private boolean parked, active, incomplete, speedExceeded, hardBraking;
+    private Boolean parked;
+    private boolean active, incomplete, speedExceeded, hardBraking;
     private long startNs, previousNs, movingNs;
     private float previousSpeed;
     private double meters;
-    private Summary last;
 
-    void gear(boolean park, long timeNs) {
-        if (park == parked) return;
+    TripMeter(Checkpoint saved) {
+        active = saved.active();
+        incomplete = saved.incomplete();
+        meters = saved.meters();
+        movingNs = saved.movingNs();
+        speedExceeded = saved.speedExceeded();
+        hardBraking = saved.hardBraking();
+    }
+
+    boolean gear(boolean park, long timeNs) {
+        if (Boolean.valueOf(park).equals(parked)) return false;
         if (park) {
-            if (active && !incomplete && meters > 0 && timeNs - previousNs <= MAX_GAP_NS) {
-                last = new Summary((float) (meters / 1000), (int) (movingNs / 1_000_000_000L),
-                        speedExceeded, hardBraking);
+            if (active && Boolean.FALSE.equals(parked)) {
+                incomplete |= previousNs < 0 || timeNs - previousNs > MAX_GAP_NS;
             }
-            active = false;
-        } else if (parked) {
-            active = true;
-            incomplete = speedExceeded = hardBraking = false;
+        } else {
+            if (Boolean.TRUE.equals(parked) && !active) {
+                active = true;
+                incomplete = speedExceeded = hardBraking = false;
+                movingNs = 0;
+                meters = 0;
+            } else if (parked == null && active) {
+                incomplete = true;
+            }
             startNs = timeNs;
-            previousNs = movingNs = 0;
-            meters = 0;
-            last = null;
+            previousNs = -1;
         }
         parked = park;
+        return true;
     }
 
     void speed(long timeNs, float metersPerSecond) {
-        if (!active || timeNs < startNs || timeNs <= previousNs) return;
+        if (!active || !Boolean.FALSE.equals(parked) || incomplete
+                || timeNs < startNs || timeNs <= previousNs) return;
         float speed = Math.abs(metersPerSecond);
-        if (!Float.isFinite(speed)) { invalidate(); return; }
+        if (!Float.isFinite(speed)) { incomplete = true; return; }
         speedExceeded |= metersPerSecond > SPEED_CUE_KPH / 3.6f;
-        if (previousNs == 0) {
+        if (previousNs < 0) {
             if (timeNs - startNs > MAX_GAP_NS) incomplete = true;
         } else {
             long gap = timeNs - previousNs;
@@ -55,10 +70,30 @@ final class TripMeter {
         previousSpeed = speed;
     }
 
-    void invalidate() {
-        parked = active = false;
-        last = null;
+    void signalLost(boolean gearSignal) {
+        if (active && Boolean.FALSE.equals(parked)) incomplete = true;
+        if (gearSignal) parked = null;
     }
 
-    Summary last() { return last; }
+    boolean parked() { return Boolean.TRUE.equals(parked); }
+    boolean active() { return active; }
+    boolean incomplete() { return incomplete; }
+
+    boolean finish() {
+        if (!parked() || !active) return false;
+        active = false;
+        return true;
+    }
+
+    Summary summary() {
+        if (incomplete || meters <= 0) return null;
+        return new Summary((float) (meters / 1000), (int) (movingNs / 1_000_000_000L),
+                speedExceeded, hardBraking);
+    }
+
+    Checkpoint checkpoint() {
+        // The last persisted totals cover completed legs through the most recent park event.
+        return new Checkpoint(active, incomplete || (active && !parked()), meters, movingNs,
+                speedExceeded, hardBraking);
+    }
 }

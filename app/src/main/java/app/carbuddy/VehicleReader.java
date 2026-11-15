@@ -24,10 +24,6 @@ final class VehicleReader {
         vehicle.initialize();
     }
 
-    interface Read<T> {
-        void call(Function1<? super T, Unit> good, Function1<? super Exception, Unit> bad);
-    }
-
     void watchBattery(Consumer<Integer> consumer) {
         var ev = vehicle.getEvBattery();
         ev.checkEvBatteryStateOfChargeCapabilities(config -> {
@@ -56,53 +52,36 @@ final class VehicleReader {
         return access == AccessType.READ || access == AccessType.READ_WRITE;
     }
 
-    void read(Consumer<TripStory> result) {
+    void readBattery(Consumer<Integer> result) {
         if (closed) return;
         class Request {
-            Integer battery;
-            Float km;
-            Integer minutes;
-            int pending = 3;
             boolean delivered;
-            void finish() {
+            void finish(Integer battery) {
                 if (!delivered && !closed) {
                     delivered = true;
-                    result.accept(new TripStory(battery, km, minutes != null && minutes >= 0
-                            && minutes <= Integer.MAX_VALUE / 60 ? minutes * 60 : null));
+                    result.accept(battery);
                 }
             }
-            void received() { if (--pending == 0) finish(); }
         }
         Request r = new Request();
-        handler.postDelayed(r::finish, 3000);
+        handler.postDelayed(() -> r.finish(null), 3000);
         var ev = vehicle.getEvBattery();
-        var trip = vehicle.getOdometer();
-        this.<Integer>get("battery", ev::checkEvBatteryStateOfChargeCapabilities,
-                ev::getEvBatteryStateOfCharge, v -> { r.battery = v; r.received(); });
-        this.<Float>get("distance", trip::checkTripCurrentDrivingDistanceCapabilities,
-                trip::getTripCurrentDrivingDistance, v -> { r.km = v; r.received(); });
-        this.<Integer>get("duration", trip::checkTripCurrentDrivingTimeCapabilities,
-                trip::getTripCurrentDrivingTime, v -> { r.minutes = v; r.received(); });
-    }
-
-    private <T> void get(String field, Read<CapabilityConfig> capability, Read<T> get, Consumer<T> done) {
         Function1<Exception, Unit> failure = e -> {
-            Log.w(TAG, field + " unavailable: " + e);
-            handler.post(() -> { if (!closed) done.accept(null); });
+            Log.w(TAG, "Battery unavailable", e);
+            handler.post(() -> r.finish(null));
             return Unit.INSTANCE;
         };
         try {
-            capability.call(config -> {
+            ev.checkEvBatteryStateOfChargeCapabilities(config -> {
                 handler.post(() -> {
-                    if (closed) return;
+                    if (closed || r.delivered) return;
                     if (!readable(config)) {
-                        Log.d(TAG, field + " has no read capability");
-                        done.accept(null);
+                        r.finish(null);
                         return;
                     }
                     try {
-                        get.call(value -> {
-                            handler.post(() -> { if (!closed) done.accept(value); });
+                        ev.getEvBatteryStateOfCharge(value -> {
+                            handler.post(() -> r.finish(value));
                             return Unit.INSTANCE;
                         }, failure);
                     } catch (RuntimeException e) { failure.invoke(e); }

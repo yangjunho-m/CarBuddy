@@ -36,13 +36,12 @@ import java.util.List;
 public final class MainActivity extends Activity {
     private static final int PAPER = 0xfff7f2e8, INK = 0xff183731, MUTED = 0xff46615a;
     private static final int STAGE = 0xff173b35;
-    private static final TripStory EMPTY = new TripStory(null, null, null);
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Car car;
     private CarUxRestrictionsManager restrictions;
     private TripRecorder recorder;
     private VehicleReader reader;
-    private TripStory trip = EMPTY;
+    private Integer batteryLevel;
     private boolean resumed, allowed, loading, open, musicPlaying;
     private AudioManager audio;
     private final AudioManager.AudioPlaybackCallback playback = new AudioManager.AudioPlaybackCallback() {
@@ -55,7 +54,7 @@ public final class MainActivity extends Activity {
     private AlertDialog reactionDialog;
     private int request;
     private TextView headerStatus, mascotTitle, mascotNote, distance, duration, battery, storyCopy;
-    private Button diary, refresh, reactions, speedPermission;
+    private Button finish, diary, refresh, reactions, speedPermission;
     private LinearLayout characters;
     private final Button[] characterButtons = new Button[CharacterArt.values().length];
     private Mascot mascot;
@@ -134,7 +133,8 @@ public final class MainActivity extends Activity {
         try {
             var manager = (CarPropertyManager) connected.getCarManager(Car.PROPERTY_SERVICE);
             if (manager != null) {
-                recorder = new TripRecorder(manager, this::render);
+                recorder = new TripRecorder(manager, getSharedPreferences("journey", MODE_PRIVATE),
+                        this::render);
                 recorder.start();
             }
         } catch (RuntimeException e) {
@@ -152,10 +152,6 @@ public final class MainActivity extends Activity {
         super.onRequestPermissionsResult(code, permissions, grants);
         if (code == 1 && car != null && car.isConnected()) startRecorder(car);
         render();
-    }
-
-    private TripStory diaryTrip() {
-        return trip.withMeasured(recorder == null ? null : recorder.last());
     }
 
     private boolean checkRestrictions() {
@@ -178,14 +174,14 @@ public final class MainActivity extends Activity {
             loading = open = false;
             preview = null;
             if (reactionDialog != null) reactionDialog.dismiss();
-            trip = EMPTY;
+            batteryLevel = null;
             if (reader != null) { reader.close(); reader = null; }
         } else {
             try {
                 reader = new VehicleReader(this, handler);
                 reader.watchBattery(level -> {
                     if (!allowed || loading) return;
-                    trip = new TripStory(level, trip.km(), trip.seconds());
+                    batteryLevel = level;
                     render();
                 });
             } catch (RuntimeException e) {
@@ -200,12 +196,10 @@ public final class MainActivity extends Activity {
         if (reader == null || !allowed) return;
         int token = ++request;
         loading = true;
-        open = false;
-        trip = EMPTY;
         render();
-        reader.read(value -> {
+        reader.readBattery(value -> {
             if (token != request || !allowed) return;
-            trip = value;
+            batteryLevel = value;
             loading = false;
             render();
         });
@@ -293,15 +287,24 @@ public final class MainActivity extends Activity {
         panel.addView(metrics, params(-1, -2, 0, 22));
         controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.VERTICAL);
+        finish = button("주행 끝내기", INK, Color.WHITE, 0);
+        finish.setOnClickListener(v -> {
+            if (checkRestrictions() && recorder != null && recorder.finish()) {
+                open = recorder.summary() != null;
+                render();
+            }
+        });
+        controls.addView(finish, params(-1, dp(56), 0, 8));
         diary = button("일기 열기", INK, Color.WHITE, 0);
         diary.setOnClickListener(v -> {
-            if (checkRestrictions() && !loading && diaryTrip().hasData()) {
+            if (checkRestrictions() && recorder != null && recorder.parked() && !recorder.active()
+                    && recorder.summary() != null) {
                 open = !open;
                 render();
             }
         });
         controls.addView(diary, params(-1, dp(56), 0, 8));
-        refresh = button("차량 기록 다시 읽기", PAPER, INK, 0xff748a7e);
+        refresh = button("배터리 다시 읽기", PAPER, INK, 0xff748a7e);
         refresh.setOnClickListener(v -> { if (checkRestrictions()) load(); });
         controls.addView(refresh, params(-1, dp(52), 0, 0));
         speedPermission = button("주행 기록 권한 허용", PAPER, INK, 0xff748a7e);
@@ -314,10 +317,15 @@ public final class MainActivity extends Activity {
     }
 
     private void render() {
-        TripStory entry = diaryTrip();
-        TripMeter.Summary measured = lastMeasured();
-        Expression face = preview != null ? preview : automaticExpression(measured);
-        headerStatus.setText(allowed ? "주차 중  ·  Pleos Vehicle" : "주차 시 이용 가능");
+        boolean parked = recorder != null && recorder.parked();
+        boolean active = recorder != null && recorder.active();
+        boolean incomplete = recorder != null && recorder.incomplete();
+        TripMeter.Summary measured = parked ? recorder.summary() : null;
+        TripStory entry = new TripStory(batteryLevel, measured == null ? null : measured.km(),
+                measured == null ? null : measured.seconds());
+        Expression face = preview != null ? preview : automaticExpression(entry, measured);
+        headerStatus.setText(allowed ? parked ? "주차 중  ·  Pleos Vehicle" : "Pleos Vehicle"
+                : "주차 시 이용 가능");
         mascotTitle.setText(!allowed ? "안전하게 도착하면 만나!" : character.label);
         mascotNote.setText(!allowed ? "주차한 뒤 다시 열어 줘."
                 : (preview != null ? "미리보기 · " : "") + face.note);
@@ -334,25 +342,25 @@ public final class MainActivity extends Activity {
         metrics.setVisibility(allowed ? View.VISIBLE : View.GONE);
         controls.setVisibility(allowed ? View.VISIBLE : View.GONE);
         storyCopy.setText(!allowed ? "차량의 주행 제한이 해제되면 일기를 볼 수 있어요."
-                : loading ? "차량에서 이번 트립 기록을 읽고 있어요."
-                : !entry.hasData() ? "아직 확인할 수 있는 차량 기록이 없어요."
+                : !hasSpeedPermission() ? "주행 기록 권한을 허용한 뒤 출발하면 기록을 시작해요."
+                : !parked ? "기어를 P로 바꾸면 주행 기록을 확인할 수 있어요."
+                : active && incomplete ? "주행 신호가 끊겨 전체 일기를 만들 수 없어요. 주행 끝내기로 이번 기록을 정리해 주세요."
+                : active ? "중간에 잠깐 주차해도 기록이 이어져요. 목적지에서 주행 끝내기를 눌러 주세요."
+                : incomplete ? "이번 주행의 신호가 끊겼어요. 다음 출발부터 새로 기록해요."
+                : measured == null ? "출발하면 기록을 시작해요. 목적지에 주차한 뒤 주행 끝내기를 눌러 주세요."
                 : open ? entry.text() + motionNote(measured) : character.label + "에게 이번 이동 이야기를 들어보세요.");
         distance.setText(entry.distance());
         duration.setText(entry.duration());
-        battery.setText(trip.battery() == null ? "—" : trip.battery() + "%");
+        battery.setText(entry.battery() == null ? "—" : entry.battery() + "%");
+        finish.setVisibility(allowed && parked && active ? View.VISIBLE : View.GONE);
         diary.setText(open ? "일기 닫기" : "일기 열기");
-        diary.setEnabled(allowed && !loading && entry.hasData());
-        diary.setAlpha(diary.isEnabled() ? 1f : .55f);
+        diary.setVisibility(allowed && parked && !active && measured != null ? View.VISIBLE : View.GONE);
         refresh.setEnabled(allowed && !loading);
         speedPermission.setVisibility(allowed && !hasSpeedPermission() ? View.VISIBLE : View.GONE);
     }
 
-    private TripMeter.Summary lastMeasured() {
-        return recorder == null ? null : recorder.last();
-    }
-
-    private Expression automaticExpression(TripMeter.Summary measured) {
-        if (trip.low()) return Expression.BATTERY;
+    private Expression automaticExpression(TripStory entry, TripMeter.Summary measured) {
+        if (entry.low()) return Expression.BATTERY;
         if (musicPlaying) return Expression.MUSIC;
         if (measured != null && measured.hardBraking()) return Expression.BRAKE;
         if (measured != null && measured.speedExceeded()) return Expression.SPEED;
