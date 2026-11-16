@@ -1,7 +1,7 @@
 package app.carbuddy;
 
+import android.animation.ValueAnimator;
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.app.Dialog;
 import android.car.Car;
 import android.car.drivingstate.CarUxRestrictions;
@@ -55,18 +55,20 @@ public final class MainActivity extends Activity {
         }
     };
     private CharacterArt character;
+    private CharacterArt pickerChoice, previousPickerChoice;
+    private ValueAnimator pickerMotion;
     private SharedPreferences preferences;
     private boolean choosingCharacter, settingsOpen;
     private boolean pendingOpenDiary;
     private String floatingMessage = "";
-    private Expression preview;
-    private AlertDialog reactionDialog;
     private Dialog diaryDialog;
     private int request;
     private TextView parkedOnly, floatingHint, recordStatus, diaryFuel, diaryCopy;
-    private Button finish, arrivalDiary, previousDiary, refresh, speedPermission, floatingToggle, closePicker;
+    private Button finish, arrivalDiary, previousDiary, fuelPermission, speedPermission, floatingToggle, closePicker;
+    private Button confirmPicker;
     private LinearLayout dashboard, picker, settings;
     private final Button[] characterButtons = new Button[CharacterArt.values().length];
+    private final BitmapDrawable[][] pickerFaces = new BitmapDrawable[characterButtons.length][Expression.values().length];
     private MascotView mascot;
 
     @Override public void onCreate(Bundle state) {
@@ -83,6 +85,12 @@ public final class MainActivity extends Activity {
         preferences = CharacterArt.preferences(this);
         character = CharacterArt.saved(preferences.getString(CharacterArt.CHOICE, ""));
         choosingCharacter = !hasChosenCharacter() || (state != null && state.getBoolean("picker"));
+        if (state != null && state.getString("picker_choice") != null) {
+            pickerChoice = CharacterArt.saved(state.getString("picker_choice"));
+        }
+        if (state != null && state.getString("picker_previous") != null) {
+            previousPickerChoice = CharacterArt.saved(state.getString("picker_previous"));
+        }
         pendingOpenDiary = state == null ? getIntent().getBooleanExtra(FloatingBuddyService.OPEN_DIARY, false)
                 : state.getBoolean("pending_diary");
         settingsOpen = state == null ? !choosingCharacter && !pendingOpenDiary : state.getBoolean("settings");
@@ -133,6 +141,8 @@ public final class MainActivity extends Activity {
 
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putBoolean("picker", choosingCharacter);
+        if (pickerChoice != null) state.putString("picker_choice", pickerChoice.name());
+        if (previousPickerChoice != null) state.putString("picker_previous", previousPickerChoice.name());
         state.putBoolean("settings", settingsOpen);
         state.putBoolean("pending_diary", pendingOpenDiary || diaryDialog != null);
         super.onSaveInstanceState(state);
@@ -142,7 +152,7 @@ public final class MainActivity extends Activity {
         super.onNewIntent(intent);
         pendingOpenDiary |= intent.getBooleanExtra(FloatingBuddyService.OPEN_DIARY, false);
         if (intent.getBooleanExtra(FloatingBuddyService.OPEN_SETTINGS, false)) {
-            choosingCharacter = false;
+            setCharacterPickerOpen(false);
             settingsOpen = true;
         }
         render();
@@ -150,7 +160,7 @@ public final class MainActivity extends Activity {
 
     @Override public void onBackPressed() {
         if (choosingCharacter && hasChosenCharacter()) {
-            choosingCharacter = false;
+            setCharacterPickerOpen(false);
             render();
         } else if (settingsOpen) {
             closeSettings();
@@ -221,10 +231,9 @@ public final class MainActivity extends Activity {
         if (allowed == next) { render(); return; }
         allowed = next;
         if (!allowed) {
+            if (pickerMotion != null) pickerMotion.end();
             request++;
             loading = false;
-            preview = null;
-            if (reactionDialog != null) reactionDialog.dismiss();
             if (diaryDialog != null) diaryDialog.dismiss();
             fuelLevel = null;
             if (reader != null) { reader.close(); reader = null; }
@@ -273,11 +282,10 @@ public final class MainActivity extends Activity {
     }
 
     private void chooseCharacter(CharacterArt choice) {
-        if (!checkRestrictions()) return;
+        if (choice == null || !checkRestrictions() || !picker.isShown()) return;
         boolean first = !hasChosenCharacter();
         character = choice;
-        preview = null;
-        choosingCharacter = false;
+        setCharacterPickerOpen(false);
         settingsOpen = false;
         SharedPreferences.Editor edits = preferences.edit().putString(CharacterArt.CHOICE, choice.name())
                 .putBoolean(CharacterArt.PICKED, true);
@@ -289,6 +297,37 @@ public final class MainActivity extends Activity {
             settingsOpen = true;
             render();
         }
+    }
+
+    private void setCharacterPickerOpen(boolean open) {
+        if (pickerMotion != null) pickerMotion.end();
+        pickerChoice = previousPickerChoice = null;
+        choosingCharacter = open;
+    }
+
+    private void previewCharacter(CharacterArt choice) {
+        if (!checkRestrictions() || !picker.isShown()) return;
+        if (pickerMotion != null) pickerMotion.end();
+        CharacterArt previous = pickerSelection();
+        if (previous != choice) previousPickerChoice = previous;
+        pickerChoice = choice;
+        render();
+        if (!ValueAnimator.areAnimatorsEnabled()) return;
+
+        Button card = characterButtons[choice.ordinal()];
+        BitmapDrawable face = pickerFaces[choice.ordinal()][Expression.MUSIC.ordinal()];
+        int width = face.getBounds().width();
+        int height = face.getBounds().height();
+        pickerMotion = ValueAnimator.ofFloat(0f, -1f, 1f, -.7f, .7f, -.35f, .35f, 0f);
+        pickerMotion.setDuration(420);
+        pickerMotion.addUpdateListener(animation -> {
+            float rev = (float) animation.getAnimatedValue();
+            int x = dp(5 * rev);
+            int y = dp(-3 * Math.abs(rev));
+            face.setBounds(x, y, x + width, y + height);
+            card.invalidate();
+        });
+        pickerMotion.start();
     }
 
     private void toggleFloatingBuddy() {
@@ -376,14 +415,11 @@ public final class MainActivity extends Activity {
         Button changeCharacter = button("캐릭터 선택하기", surface, ink, line);
         changeCharacter.setOnClickListener(v -> {
             if (checkRestrictions()) {
-                choosingCharacter = true;
+                setCharacterPickerOpen(true);
                 render();
             }
         });
         settings.addView(changeCharacter, params(-1, -2, 0, 8));
-        Button reactions = button("표정 미리보기", surface, ink, line);
-        reactions.setOnClickListener(v -> chooseExpression());
-        settings.addView(reactions, params(-1, -2, 0, 8));
         floatingToggle = button("다른 앱 위에 표시", surface, ink, line);
         floatingToggle.setOnClickListener(v -> toggleFloatingBuddy());
         settings.addView(floatingToggle, params(-1, -2, 0, 0));
@@ -404,14 +440,13 @@ public final class MainActivity extends Activity {
         previousDiary = button("최근 주행일기", surface, ink, line);
         previousDiary.setOnClickListener(v -> openCurrentDiary());
         settings.addView(previousDiary, params(-1, -2, 0, 8));
-        refresh = button("연료 잔량 다시 읽기", surface, ink, line);
-        refresh.setOnClickListener(v -> {
-            if (!checkRestrictions()) return;
-            if (!hasFuelPermission()) requestPermissions(new String[]{Car.PERMISSION_ENERGY}, 2);
-            else if (reader == null) startFuel();
-            else load();
+        fuelPermission = button("연료 정보 권한 허용", surface, ink, line);
+        fuelPermission.setOnClickListener(v -> {
+            if (checkRestrictions() && !hasFuelPermission()) {
+                requestPermissions(new String[]{Car.PERMISSION_ENERGY}, 2);
+            }
         });
-        settings.addView(refresh, params(-1, -2, 0, 0));
+        settings.addView(fuelPermission, params(-1, -2, 0, 0));
         speedPermission = button("주행 기록 권한 허용", surface, ink, line);
         speedPermission.setOnClickListener(v -> {
             if (checkRestrictions()) requestPermissions(new String[]{Car.PERMISSION_SPEED}, 1);
@@ -435,38 +470,75 @@ public final class MainActivity extends Activity {
         header.setGravity(Gravity.CENTER_VERTICAL);
         picker.addView(header, params(-1, -2, 0, 12));
         header.addView(text("카버디", 38, ink, true), new LinearLayout.LayoutParams(0, -2, 1f));
-        closePicker = button("닫기", surface, ink, line);
+        closePicker = button("닫기", selected, ink, 0);
         closePicker.setOnClickListener(v -> {
-            choosingCharacter = false;
+            setCharacterPickerOpen(false);
             render();
         });
         header.addView(closePicker, params(-2, -2, 0, 0));
         picker.addView(divider(), params(-1, dp(1), 0, 16));
         TextView heading = text("함께할 캐릭터를 골라 주세요", wide ? 36 : 28, ink, true);
         heading.setAccessibilityHeading(true);
-        picker.addView(heading, params(-1, -2, 0, wide ? 64 : 24));
+        picker.addView(heading, params(-1, -2, 0, wide ? 48 : 24));
 
         int columns = 2;
-        CharacterArt[] options = CharacterArt.values();
-        for (int start = 0; start < options.length; start += columns) {
+        int artHeight = Math.max(1, (cardWidth - 16) * 2 / 3);
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inSampleSize = 2;
+        Expression[] poses = {Expression.NEUTRAL, Expression.MUSIC, Expression.FUEL_LOW};
+        CharacterArt[] choices = CharacterArt.values();
+        for (int start = 0; start < choices.length; start += columns) {
             LinearLayout row = new LinearLayout(this);
             LinearLayout.LayoutParams rowSize = params(-2, -2, start == 0 ? 0 : wide ? 24 : 16, 0);
             rowSize.gravity = Gravity.CENTER_HORIZONTAL;
             picker.addView(row, rowSize);
-            for (int index = start; index < Math.min(start + columns, options.length); index++) {
-                CharacterArt option = options[index];
+            for (int index = start; index < Math.min(start + columns, choices.length); index++) {
+                CharacterArt option = choices[index];
                 Button choice = button(option.label, surface, ink, line);
                 choice.setTextSize(wide ? 22 : 20);
                 choice.setPadding(dp(8), dp(18), dp(8), dp(18));
-                choice.setCompoundDrawables(null, thumbnail(option, Math.max(1, (cardWidth - 16) * 2 / 3)), null, null);
+                Bitmap atlas = BitmapFactory.decodeResource(getResources(), option.image, options);
+                for (Expression pose : poses) {
+                    pickerFaces[index][pose.ordinal()] = thumbnail(atlas, pose, artHeight);
+                }
+                choice.setCompoundDrawables(null, pickerFaces[index][Expression.NEUTRAL.ordinal()], null, null);
                 choice.setCompoundDrawablePadding(dp(8));
                 choice.setBackground(buttonBackground(surface, line, true));
                 LinearLayout.LayoutParams size = params(dp(cardWidth), -2, 0, 0);
                 if (index > start) size.setMarginStart(dp(gap));
                 row.addView(choice, size);
                 characterButtons[index] = choice;
-                choice.setOnClickListener(v -> chooseCharacter(option));
+                choice.setOnClickListener(v -> previewCharacter(option));
             }
+        }
+
+        confirmPicker = button("선택하기", primary, onPrimary, 0);
+        confirmPicker.setMinWidth(dp(116));
+        confirmPicker.setOnClickListener(v -> chooseCharacter(pickerSelection()));
+        LinearLayout.LayoutParams confirmSize = params(-2, -2, 20, 0);
+        confirmSize.gravity = Gravity.END;
+        picker.addView(confirmPicker, confirmSize);
+    }
+
+    private CharacterArt pickerSelection() {
+        return pickerChoice == null && hasChosenCharacter() ? character : pickerChoice;
+    }
+
+    private void renderPicker() {
+        CharacterArt pending = pickerSelection();
+        for (CharacterArt option : CharacterArt.values()) {
+            Button card = characterButtons[option.ordinal()];
+            card.setSelected(option == pending);
+            Expression pose = option == pickerChoice ? Expression.MUSIC
+                    : option == previousPickerChoice ? Expression.FUEL_LOW : Expression.NEUTRAL;
+            BitmapDrawable face = pickerFaces[option.ordinal()][pose.ordinal()];
+            if (card.getCompoundDrawables()[1] != face) card.setCompoundDrawables(null, face, null, null);
+            card.setContentDescription(option == previousPickerChoice ? option.label + ", 시무룩한 표정" : null);
+        }
+        boolean canConfirm = pending != null;
+        if (confirmPicker.isEnabled() != canConfirm) {
+            confirmPicker.setEnabled(canConfirm);
+            confirmPicker.setBackground(buttonBackground(canConfirm ? primary : selected, 0, false));
         }
     }
 
@@ -491,7 +563,7 @@ public final class MainActivity extends Activity {
         TripStory entry = new TripStory(fuelLevel, measured == null ? null : measured.km(),
                 measured == null ? null : measured.seconds());
         if (showMascot) {
-            Expression face = preview != null ? preview : automaticExpression(entry, measured);
+            Expression face = automaticExpression(entry, measured);
             mascot.show(character, face);
             mascot.setContentDescription(character.label + ". " + face.note
                     + (settingsOpen ? " 설정 닫기" : " 설정 열기"));
@@ -501,7 +573,7 @@ public final class MainActivity extends Activity {
         floatingToggle.setText(floatingEnabled() ? "다른 앱 위 표시 끄기" : "다른 앱 위에 표시");
         floatingHint.setText(floatingMessage);
         floatingHint.setVisibility(floatingMessage.isEmpty() ? View.GONE : View.VISIBLE);
-        for (int i = 0; i < characterButtons.length; i++) characterButtons[i].setSelected(i == character.ordinal());
+        if (showPicker) renderPicker();
         String status = !hasSpeedPermission() ? "권한을 허용하면 다음 출발부터 기록해요."
                 : active && incomplete ? "주행 신호가 끊겼어요. 주행 끝내기로 이번 기록을 정리해 주세요."
                 : active ? "기록 중이에요. 중간에 주차해도 계속 이어져요."
@@ -510,17 +582,15 @@ public final class MainActivity extends Activity {
         recordStatus.setVisibility(status.isEmpty() ? View.GONE : View.VISIBLE);
         finish.setVisibility(parked && active ? View.VISIBLE : View.GONE);
         previousDiary.setVisibility(diaryAvailable && !arrival ? View.VISIBLE : View.GONE);
-        refresh.setText(!hasFuelPermission() ? "연료 정보 권한 허용"
-                : loading ? "연료 잔량 확인 중" : fuelLevel == null ? "연료 잔량 다시 읽기"
-                : "남은 연료 " + fuelLevel + "% · 다시 읽기");
-        refresh.setEnabled(allowed && !loading);
+        fuelPermission.setVisibility(hasFuelPermission() ? View.GONE : View.VISIBLE);
         speedPermission.setVisibility(!hasSpeedPermission() ? View.VISIBLE : View.GONE);
         if (diaryDialog != null) {
             if (diaryAvailable) updateDiary(entry, measured);
             else diaryDialog.dismiss();
         }
         if (launchDiary && diaryAvailable) {
-            choosingCharacter = settingsOpen = false;
+            setCharacterPickerOpen(false);
+            settingsOpen = false;
             picker.setVisibility(View.GONE);
             dashboard.setVisibility(View.VISIBLE);
             settings.setVisibility(View.GONE);
@@ -615,29 +685,6 @@ public final class MainActivity extends Activity {
         return Expression.NEUTRAL;
     }
 
-    private void chooseExpression() {
-        if (!checkRestrictions()) return;
-        Expression[] choices = Expression.values();
-        String[] labels = new String[choices.length];
-        labels[0] = "자동 · 차량 상태 반영";
-        for (int i = 1; i < choices.length; i++) labels[i] = choices[i].label;
-        reactionDialog = new AlertDialog.Builder(this).setTitle(character.label + " 표정 미리보기")
-                .setSingleChoiceItems(labels, preview == null ? 0 : preview.ordinal(), (dialog, index) -> {
-                    if (checkRestrictions()) {
-                        preview = index == 0 ? null : choices[index];
-                        render();
-                    }
-                    dialog.dismiss();
-                }).setNegativeButton("닫기", null).create();
-        reactionDialog.setOnDismissListener(dialog -> reactionDialog = null);
-        reactionDialog.show();
-        var window = reactionDialog.getWindow();
-        if (window != null) {
-            int availableWidth = getResources().getConfiguration().screenWidthDp;
-            window.setLayout(dp(Math.min(520, availableWidth - 24)), -2);
-        }
-    }
-
     private TextView metric(LinearLayout metrics, String label) {
         if (metrics.getChildCount() != 0) {
             LinearLayout.LayoutParams rule = new LinearLayout.LayoutParams(dp(1), -1);
@@ -716,14 +763,14 @@ public final class MainActivity extends Activity {
         return button;
     }
 
-    private BitmapDrawable thumbnail(CharacterArt option, int heightDp) {
-        BitmapFactory.Options options = new BitmapFactory.Options();
-        options.inSampleSize = 2;
-        Bitmap atlas = BitmapFactory.decodeResource(getResources(), option.image, options);
-        Bitmap firstFace = Bitmap.createBitmap(atlas, 0, 0, atlas.getWidth() / 2, atlas.getHeight() / 3);
-        BitmapDrawable icon = new BitmapDrawable(getResources(), firstFace);
+    private BitmapDrawable thumbnail(Bitmap atlas, Expression pose, int heightDp) {
+        int cellWidth = atlas.getWidth() / 2;
+        int cellHeight = atlas.getHeight() / 3;
+        int index = pose.spriteIndex();
+        Bitmap face = Bitmap.createBitmap(atlas, index % 2 * cellWidth, index / 2 * cellHeight, cellWidth, cellHeight);
+        BitmapDrawable icon = new BitmapDrawable(getResources(), face);
         int height = dp(heightDp);
-        icon.setBounds(0, 0, Math.round(height * (float) firstFace.getWidth() / firstFace.getHeight()), height);
+        icon.setBounds(0, 0, Math.round(height * (float) cellWidth / cellHeight), height);
         return icon;
     }
 }
