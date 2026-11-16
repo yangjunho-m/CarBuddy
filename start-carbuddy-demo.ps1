@@ -155,7 +155,7 @@ target=android-34
 }
 
 try {
-    $apk = Join-Path $PSScriptRoot 'apk\CarBuddy-debug.apk'
+    $apk = Join-Path $PSScriptRoot 'apk\moti_CarBuddy_release.apk'
     if (!(Test-Path -LiteralPath $apk)) { throw 'APK missing. Extract the full CarBuddy ZIP before running this file.' }
 
     New-Item -ItemType Directory -Path $root -Force | Out-Null

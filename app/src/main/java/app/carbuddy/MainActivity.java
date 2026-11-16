@@ -417,46 +417,52 @@ public final class MainActivity extends Activity {
             if (checkRestrictions()) requestPermissions(new String[]{Car.PERMISSION_SPEED}, 1);
         });
         settings.addView(speedPermission, params(-1, -2, 8, 0));
-        buildPicker(outer, config.screenWidthDp >= 780);
+        buildPicker(outer, config.screenWidthDp - gutter * 2);
         render();
     }
 
-    private void buildPicker(LinearLayout outer, boolean wide) {
+    private void buildPicker(LinearLayout outer, int width) {
         picker = column();
-        int width = Math.min(1140, getResources().getConfiguration().screenWidthDp - (wide ? 80 : 40));
+        boolean wide = width >= 780;
+        int inset = wide ? 40 : 20;
+        int gap = wide ? 72 : 16;
+        int cardWidth = Math.min(360, (width - inset * 2 - gap) / 2);
         picker.setBackground(buttonShape(surface, line, 1));
-        picker.setPadding(dp(wide ? 32 : 20), dp(24), dp(wide ? 32 : 20), dp(28));
-        outer.addView(picker, params(dp(width), -2, 0, 0));
+        picker.setPadding(dp(inset), dp(32), dp(inset), dp(28));
+        outer.addView(picker, params(-1, -2, 8, 0));
 
         LinearLayout header = new LinearLayout(this);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        picker.addView(header, params(-1, -2, 0, 20));
-        header.addView(text("카버디", 34, ink, true), new LinearLayout.LayoutParams(0, -2, 1f));
+        picker.addView(header, params(-1, -2, 0, 12));
+        header.addView(text("카버디", 38, ink, true), new LinearLayout.LayoutParams(0, -2, 1f));
         closePicker = button("닫기", surface, ink, line);
         closePicker.setOnClickListener(v -> {
             choosingCharacter = false;
             render();
         });
         header.addView(closePicker, params(-2, -2, 0, 0));
-        picker.addView(divider(), params(-1, dp(1), 0, 34));
-        picker.addView(text("함께할 캐릭터를 골라 주세요", 34, ink, true));
-        picker.addView(text("선택한 캐릭터는 나중에 바꿀 수 있어요.", 20, muted, false),
-                params(-1, -2, 8, 26));
+        picker.addView(divider(), params(-1, dp(1), 0, 16));
+        TextView heading = text("함께할 캐릭터를 골라 주세요", wide ? 36 : 28, ink, true);
+        heading.setAccessibilityHeading(true);
+        picker.addView(heading, params(-1, -2, 0, wide ? 64 : 24));
 
-        int perRow = wide ? 4 : 2;
+        int columns = 2;
         CharacterArt[] options = CharacterArt.values();
-        for (int start = 0; start < options.length; start += perRow) {
+        for (int start = 0; start < options.length; start += columns) {
             LinearLayout row = new LinearLayout(this);
-            picker.addView(row, params(-1, -2, start == 0 ? 0 : 12, 0));
-            for (int index = start; index < Math.min(start + perRow, options.length); index++) {
+            LinearLayout.LayoutParams rowSize = params(-2, -2, start == 0 ? 0 : wide ? 24 : 16, 0);
+            rowSize.gravity = Gravity.CENTER_HORIZONTAL;
+            picker.addView(row, rowSize);
+            for (int index = start; index < Math.min(start + columns, options.length); index++) {
                 CharacterArt option = options[index];
                 Button choice = button(option.label, surface, ink, line);
-                choice.setPadding(dp(8), dp(18), dp(8), dp(16));
-                choice.setCompoundDrawables(null, thumbnail(option, wide ? 154 : 102), null, null);
-                choice.setCompoundDrawablePadding(dp(12));
+                choice.setTextSize(wide ? 22 : 20);
+                choice.setPadding(dp(8), dp(18), dp(8), dp(18));
+                choice.setCompoundDrawables(null, thumbnail(option, Math.max(1, (cardWidth - 16) * 2 / 3)), null, null);
+                choice.setCompoundDrawablePadding(dp(8));
                 choice.setBackground(buttonBackground(surface, line, true));
-                LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(0, -2, 1f);
-                if (index > start) size.setMarginStart(dp(12));
+                LinearLayout.LayoutParams size = params(dp(cardWidth), -2, 0, 0);
+                if (index > start) size.setMarginStart(dp(gap));
                 row.addView(choice, size);
                 characterButtons[index] = choice;
                 choice.setOnClickListener(v -> chooseCharacter(option));

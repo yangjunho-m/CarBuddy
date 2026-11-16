@@ -19,7 +19,7 @@
 1. Android Studio에서 이 폴더를 엽니다. JDK 17과 Android SDK Platform 35가 필요합니다.
 2. [Pleos Connect Emulator 설치 안내](https://document.pleos.ai/docs/connect/guide/getting-started/application-development/setup-connect-sdk-emulator)에 따라 API 34의 Pleos Connect AVD를 만들고 Cold boot로 시작합니다.
 3. Android Studio에서 `app`을 실행하거나 PowerShell에서 `./gradlew.bat :app:assembleDebug :app:lintDebug`를 실행합니다.
-4. 빌드 결과는 `app/build/outputs/apk/debug/app-debug.apk`에 생깁니다. 바로 시험할 수 있는 사본은 `apk/CarBuddy-debug.apk`에 있습니다. APK는 Android Automotive용입니다.
+4. 빌드 결과는 `app/build/outputs/apk/debug/app-debug.apk`에 생깁니다. 바로 시험할 수 있는 디버그 서명 사본은 `apk/moti_CarBuddy_release.apk`에 있습니다. APK는 Android Automotive용입니다.
 
 ## 에뮬레이터에서 시연하기
 
